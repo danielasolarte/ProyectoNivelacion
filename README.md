@@ -92,32 +92,153 @@ La API debe responder rapidamente despues de registrar y encolar el trabajo. La 
 
 No es necesario instalar Go localmente para ejecutar la aplicacion, porque la API se compila dentro del Dockerfile.
 
-## Ejecucion
+## Guia paso a paso
 
-Desde la raiz del proyecto:
+### 1. Iniciar Docker Desktop
 
-```bash
-docker compose up --build
+Abre Docker Desktop y espera a que el motor indique que esta activo. La aplicacion necesita Docker Compose para construir y ejecutar todos los servicios.
+
+### 2. Abrir la carpeta del proyecto
+
+En PowerShell, ubicate en la raiz del repositorio:
+
+```powershell
+Set-Location "C:\ruta\al\ProyectoNivelacion"
 ```
 
-La API queda disponible en `http://localhost:8080` y PostgreSQL en el puerto `5432`.
-El frontend queda disponible en `http://localhost:3000`.
+La carpeta correcta contiene `docker-compose.yml`, `api`, `worker`, `frontend` y `db`.
 
-Para ejecutar los servicios en segundo plano:
+### 3. Construir y levantar la aplicacion
 
-```bash
+Ejecuta el siguiente comando la primera vez y cada vez que cambie el codigo:
+
+```powershell
 docker compose up --build -d
 ```
 
-Para revisar el estado:
+Este comando construye y levanta:
 
-```bash
+- Frontend en Nginx.
+- API en Go.
+- Worker en Go.
+- PostgreSQL.
+- Redis.
+- MinIO.
+
+### 4. Verificar los servicios
+
+```powershell
 docker compose ps
 ```
 
-PostgreSQL debe aparecer como `healthy`.
+Debes ver estos servicios activos:
 
-Abre `http://localhost:3000` para usar el flujo completo desde el navegador.
+```text
+api
+frontend
+minio
+postgres
+redis
+worker
+```
+
+PostgreSQL y Redis deben mostrar el estado `healthy`.
+
+Si un servicio no inicia, revisa sus logs:
+
+```powershell
+docker compose logs api
+docker compose logs worker
+docker compose logs postgres
+```
+
+### 5. Abrir el frontend
+
+Abre esta direccion en el navegador:
+
+```text
+http://localhost:3000
+```
+
+El frontend muestra el formulario de registro y login.
+
+### 6. Crear una cuenta
+
+Desde el frontend:
+
+1. Escribe un email.
+2. Escribe una contraseña de al menos 8 caracteres.
+3. Presiona `Make an account`.
+
+Al terminar, la aplicacion guarda el token de sesión en el navegador y muestra el espacio de carga.
+
+### 7. Cargar un documento
+
+1. Presiona `Choose a tiny Markdown file`.
+2. Selecciona `prueba.md` o cualquier archivo `.md`.
+3. Presiona `Make my bundle`.
+
+La API responde inmediatamente con un trabajo en estado `queued`. Luego el worker:
+
+1. Lee el archivo desde MinIO.
+2. Segmenta el Markdown por encabezados.
+3. Genera el bundle.
+4. Valida `index.md`, `log.md` y sus enlaces.
+5. Guarda el ZIP en MinIO.
+6. Cambia el trabajo a `completed`.
+
+El frontend consulta el estado automáticamente. Cuando termina, aparece `Take my cute bundle.zip`.
+
+### 8. Descargar el bundle
+
+Presiona `Take my cute bundle.zip`. El navegador descargara un archivo llamado `bundle.zip`.
+
+El ZIP debe contener:
+
+```text
+index.md
+log.md
+capitulo-01.md
+capitulo-02.md
+...
+```
+
+Un documento sin encabezados genera un unico `documento.md`.
+
+### 9. Detener la aplicacion
+
+Para detener los contenedores sin eliminar los datos:
+
+```powershell
+docker compose down
+```
+
+Para volver a iniciar sin reconstruir:
+
+```powershell
+docker compose up -d
+```
+
+### 10. Reiniciar desde cero
+
+Este comando elimina tambien los volumenes de PostgreSQL y MinIO. Los documentos y usuarios guardados se perderan:
+
+```powershell
+docker compose down -v
+docker compose up --build -d
+```
+
+## Direcciones de los servicios
+
+```text
+Frontend:      http://localhost:3000
+API:           http://localhost:8080
+API health:    http://localhost:8080/health
+MinIO API:     http://localhost:9000
+MinIO consola: http://localhost:9001
+PostgreSQL:    localhost:5432
+Redis:         localhost:6379
+```
 
 ## Pruebas actuales
 
@@ -207,6 +328,51 @@ Consultar los bundles generados:
 docker compose exec postgres psql -U okf -d okf -c "SELECT job_id, storage_key, validation_status FROM bundles ORDER BY created_at DESC;"
 ```
 
+## Solucion de problemas
+
+### La pagina no carga
+
+Comprueba que el frontend este activo:
+
+```powershell
+docker compose ps frontend
+docker compose logs frontend
+```
+
+Si no esta activo, ejecuta:
+
+```powershell
+docker compose up --build -d frontend
+```
+
+### Aparece `autenticacion requerida` al descargar
+
+No abras directamente la URL `http://localhost:8080/jobs/<job_id>/download` desde el navegador. Esa ruta exige el token `Bearer`.
+
+Usa el boton `Take my cute bundle.zip` dentro del frontend. Si el navegador conserva una version anterior, haz una recarga completa con `Ctrl + F5`, cierra sesion e inicia sesion nuevamente.
+
+### La carga no termina
+
+Revisa el estado de API, Redis y worker:
+
+```powershell
+docker compose ps
+docker compose logs api --tail 30
+docker compose logs worker --tail 30
+docker compose logs redis --tail 30
+```
+
+El trabajo puede pasar por `queued` y `processing` antes de llegar a `completed`.
+
+### Error de conexión con PostgreSQL
+
+Espera a que el servicio aparezca como `healthy` y vuelve a levantar la API:
+
+```powershell
+docker compose up -d postgres
+docker compose up -d api worker
+```
+
 ## Base de datos
 
 La configuracion local de PostgreSQL es:
@@ -263,16 +429,5 @@ documento.md
 
 ## Pendiente
 
-1. Crear el frontend y las pruebas de aislamiento multiusuario.
-
-## Detener los servicios
-
-```bash
-docker compose down
-```
-
-Para eliminar tambien los datos persistidos de PostgreSQL:
-
-```bash
-docker compose down -v
-```
+1. Mejorar la interfaz y agregar soporte para mas formatos de entrada.
+2. Agregar observabilidad y metricas del procesamiento.
