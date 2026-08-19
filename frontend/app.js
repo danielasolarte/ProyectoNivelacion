@@ -45,9 +45,25 @@ async function poll(jobId) {
   if (!response.ok) return;
   const job = await response.json(); $('job-status').textContent = job.status; $('job-message').textContent = job.error || (job.status === 'completed' ? 'Bundle validated and ready.' : 'Worker is processing the document...');
   $('progress-bar').style.width = job.status === 'completed' ? '100%' : job.status === 'failed' ? '100%' : job.status === 'processing' ? '65%' : '30%';
-  if (job.status === 'completed') { $('download').href = `${API}/jobs/${jobId}/download`; $('download').setAttribute('download', 'bundle.zip'); $('download').classList.remove('hidden'); return; }
+  if (job.status === 'completed') { $('download').dataset.jobId = jobId; $('download').classList.remove('hidden'); return; }
   if (job.status !== 'failed') pollTimer = setTimeout(() => poll(jobId), 800);
 }
+
+$('download').addEventListener('click', async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const jobId = event.currentTarget.dataset.jobId;
+  if (!token || !jobId) return;
+  const response = await fetch(`${API}/jobs/${jobId}/download`, {headers: {Authorization: `Bearer ${token}`} });
+  if (!response.ok) { $('job-message').textContent = 'Could not download this bundle.'; return; }
+  const file = await response.blob();
+  const url = URL.createObjectURL(file);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'bundle.zip';
+  link.click();
+  URL.revokeObjectURL(url);
+});
 
 fetch(`${API}/health`).then((response) => { if (response.ok) $('connection').textContent = 'Online'; }).catch(() => {});
 showWorkspace();
