@@ -16,6 +16,18 @@ services:
       timeout: 5s
       retries: 5
 
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio_dev_password
+    volumes:
+      - minio_data:/data
+
   api:
     build:
       context: ./api
@@ -24,9 +36,16 @@ services:
     environment:
       DATABASE_URL: postgres://okf:okf_dev_password@postgres:5432/okf
       DEFAULT_USER_EMAIL: demo@example.com
+      OBJECT_STORAGE_ENDPOINT: minio:9000
+      OBJECT_STORAGE_ACCESS_KEY: minio
+      OBJECT_STORAGE_SECRET_KEY: minio_dev_password
+      OBJECT_STORAGE_BUCKET: documents
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_started
 
 volumes:
   postgres_data:
+  minio_data:

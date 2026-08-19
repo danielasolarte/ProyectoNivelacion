@@ -9,11 +9,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 var db *pgxpool.Pool
+var objectStore *minio.Client
+var objectBucket string
 
 // healthHandler responde a peticiones GET /health.
 // En Go, un "handler" HTTP es simplemente una función con esta firma:
@@ -83,11 +88,28 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	var documentID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO documents (user_id, original_name, content_type, size_bytes)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO documents (user_id, original_name, content_type, size_bytes, storage_key)
+		VALUES ($1, $2, $3, $4, '')
 		RETURNING id`, userID, header.Filename, header.Header.Get("Content-Type"), header.Size).Scan(&documentID)
 	if err != nil {
 		http.Error(w, "no se pudo registrar el documento", http.StatusInternalServerError)
+		return
+	}
+
+	storageKey := path.Join("users", userID, "documents", documentID, path.Base(header.Filename))
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	_, err = objectStore.PutObject(ctx, objectBucket, storageKey, file, header.Size, minio.PutObjectOptions{ContentType: contentType})
+	if err != nil {
+		http.Error(w, "no se pudo guardar el archivo", http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec(ctx, `UPDATE documents SET storage_key = $1 WHERE id = $2`, storageKey, documentID)
+	if err != nil {
+		http.Error(w, "no se pudo actualizar la ubicacion del archivo", http.StatusInternalServerError)
 		return
 	}
 
@@ -149,6 +171,27 @@ func main() {
 
 	if err := db.Ping(context.Background()); err != nil {
 		log.Fatal("no se pudo conectar a PostgreSQL: ", err)
+	}
+
+	objectStore, err = minio.New(os.Getenv("OBJECT_STORAGE_ENDPOINT"), &minio.Options{
+		Creds:  credentials.NewStaticV4(os.Getenv("OBJECT_STORAGE_ACCESS_KEY"), os.Getenv("OBJECT_STORAGE_SECRET_KEY"), ""),
+		Secure: false,
+	})
+	if err != nil {
+		log.Fatal("no se pudo crear el cliente de almacenamiento: ", err)
+	}
+	objectBucket = os.Getenv("OBJECT_STORAGE_BUCKET")
+	if objectBucket == "" {
+		log.Fatal("OBJECT_STORAGE_BUCKET no esta configurada")
+	}
+	bucketExists, err := objectStore.BucketExists(context.Background(), objectBucket)
+	if err != nil {
+		log.Fatal("no se pudo comprobar el bucket: ", err)
+	}
+	if !bucketExists {
+		if err := objectStore.MakeBucket(context.Background(), objectBucket, minio.MakeBucketOptions{}); err != nil {
+			log.Fatal("no se pudo crear el bucket: ", err)
+		}
 	}
 
 	// http.HandleFunc registra qué función debe atender cada ruta.

@@ -1,23 +1,3 @@
-#### Proyecto por Daniela Solarte y Samara Martinez
-
-# Plataforma de conversión documental a bundles OKF
-
-Plataforma web multiusuario que recibe documentos, los procesa de forma asíncrona mediante
-workers independientes de la API, y genera como resultado un *bundle* de conocimiento
-compatible con Open Knowledge Format (OKF): una carpeta con `index.md`, `log.md` y uno
-o más documentos de concepto en Markdown.
-
-## Flujo
-1. El usuario carga un documento → la API responde de inmediato con un identificador de trabajo (job ID).
-2. El trabajo se encola y es procesado en segundo plano por un worker independiente.
-3. El worker segmenta el documento en unidades lógicas y genera el bundle OKF.
-4. El bundle se valida (estructura mínima + enlaces del índice) antes de publicarse.
-5. El usuario consulta el estado del trabajo y descarga el bundle completo.
-
-## Arquitectura
-
-Proyecto de nivelación — ISIS4426 Desarrollo de Soluciones Cloud.
-
 # Plataforma de conversion documental a bundles OKF
 
 Proyecto de nivelacion de Daniela Solarte y Samara Martinez para la asignatura ISIS4426 Desarrollo de Soluciones Cloud.
@@ -36,17 +16,19 @@ En esta etapa ya estan implementados:
 - Endpoint `GET /health`.
 - Endpoint `POST /upload`.
 - Registro de los metadatos del documento en PostgreSQL.
+- Almacenamiento del archivo original en MinIO.
+- Registro de la ruta del objeto en `documents.storage_key`.
 - Creacion de un trabajo con estado `queued`.
 - Generacion de identificadores UUID desde PostgreSQL.
 
-Actualmente se usa el usuario demo `demo@example.com`. La autenticacion real, el almacenamiento del archivo y el procesamiento asincrono aun no estan implementados.
+Actualmente se usa el usuario demo `demo@example.com`. La autenticacion real, el procesamiento asincrono y la generacion del bundle aun no estan implementados.
 
 ## Arquitectura planificada
 
 - **Backend:** API y workers independientes implementados en Go.
 - **Cola de mensajes:** Redis, pendiente de integrar.
 - **Base de datos:** PostgreSQL para metadatos de usuarios, documentos, trabajos y bundles.
-- **Almacenamiento de objetos:** MinIO para documentos originales y bundles, pendiente de integrar.
+- **Almacenamiento de objetos:** MinIO para documentos originales y bundles.
 - **Despliegue:** Docker Compose.
 
 El flujo final esperado es:
@@ -135,7 +117,7 @@ Respuesta esperada:
 {"job_id":"<uuid>","status":"queued"}
 ```
 
-La API registra el usuario demo, el documento y el trabajo en una transaccion de PostgreSQL. En esta etapa no guarda aun el contenido del archivo ni inicia su conversion.
+La API registra el usuario demo, el documento y el trabajo en una transaccion de PostgreSQL, y guarda el archivo original en MinIO. En esta etapa aun no inicia su conversion.
 
 ### Consultar las tablas
 
@@ -169,18 +151,37 @@ El esquema inicial crea estas tablas:
 
 Los datos se conservan en el volumen Docker `postgres_data`. Los scripts de `db/init` se ejecutan automaticamente cuando se crea la base por primera vez.
 
+## Almacenamiento de objetos
+
+MinIO esta disponible en:
+
+```text
+API S3: http://localhost:9000
+Consola web: http://localhost:9001
+Usuario: minio
+Contrasena: minio_dev_password
+Bucket: documents
+```
+
+Los objetos se guardan con una ruta similar a:
+
+```text
+users/<user-id>/documents/<document-id>/prueba.md
+```
+
+El volumen Docker `minio_data` conserva los archivos aunque los contenedores se reinicien.
+
 ## Pendiente
 
 1. Implementar registro, autenticacion y autorizacion por propietario.
 2. Agregar Redis y publicar cada trabajo desde la API.
 3. Crear el worker independiente en Go.
-4. Guardar originales y bundles en MinIO.
-5. Leer y segmentar documentos Markdown.
-6. Generar `index.md`, `log.md` y los documentos de concepto.
-7. Validar la estructura y los enlaces del bundle.
-8. Agregar consulta de estado y descarga del bundle.
-9. Implementar idempotencia y reintentos.
-10. Crear el frontend y las pruebas de aislamiento multiusuario.
+4. Leer y segmentar documentos Markdown.
+5. Generar `index.md`, `log.md` y los documentos de concepto en MinIO.
+6. Validar la estructura y los enlaces del bundle.
+7. Agregar consulta de estado y descarga del bundle.
+8. Implementar idempotencia y reintentos.
+9. Crear el frontend y las pruebas de aislamiento multiusuario.
 
 ## Detener los servicios
 
