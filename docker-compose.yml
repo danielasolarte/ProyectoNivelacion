@@ -1,6 +1,32 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: okf
+      POSTGRES_USER: okf
+      POSTGRES_PASSWORD: okf_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U okf -d okf"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: ./api
     ports:
       - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://okf:okf_dev_password@postgres:5432/okf
+      DEFAULT_USER_EMAIL: demo@example.com
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

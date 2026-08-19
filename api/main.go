@@ -4,12 +4,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
-	"time"
+	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var db *pgxpool.Pool
 
 // healthHandler responde a peticiones GET /health.
 // En Go, un "handler" HTTP es simplemente una función con esta firma:
@@ -29,11 +33,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// uploadHandler responde a peticiones POST /upload.
-// Por ahora es un MOCK: no guarda el archivo, no lo procesa, no habla con
-// ninguna cola ni base de datos. Solo recibe el archivo, inventa un ID
-// de trabajo y lo devuelve de inmediato. El objetivo de este paso es
-// practicar cómo se recibe un archivo en Go, no la lógica real todavía.
+// uploadHandler registra los metadatos del documento y crea un trabajo pendiente.
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// Un endpoint de carga solo debe aceptar POST. Si alguien intenta
 	// un GET u otro método, respondemos con 405 (Method Not Allowed).
@@ -65,16 +65,46 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// por dónde salga". Aquí garantiza que cerremos el archivo siempre.
 	defer file.Close()
 
-	// Todavía NO leemos ni guardamos el contenido del archivo — eso vendrá
-	// cuando conectemos con la base de datos y el almacenamiento de objetos.
-	// Por ahora solo confirmamos que llegó y de qué tamaño es.
 	log.Printf("archivo recibido: %s (%d bytes)\n", header.Filename, header.Size)
 
-	// ID de trabajo INVENTADO, basado en la hora actual en nanosegundos.
-	// Es un mock temporal: cuando exista la base de datos, este ID lo va
-	// a generar Postgres (o se generará antes de insertar el registro),
-	// no lo vamos a improvisar así en el código de la API.
-	jobID := fmt.Sprintf("job-%d", time.Now().UnixNano())
+	ctx := r.Context()
+	userID, err := ensureDefaultUser(ctx)
+	if err != nil {
+		http.Error(w, "no se pudo identificar al usuario: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		http.Error(w, "no se pudo iniciar la transacción", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	var documentID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO documents (user_id, original_name, content_type, size_bytes)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id`, userID, header.Filename, header.Header.Get("Content-Type"), header.Size).Scan(&documentID)
+	if err != nil {
+		http.Error(w, "no se pudo registrar el documento", http.StatusInternalServerError)
+		return
+	}
+
+	var jobID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO jobs (document_id, status)
+		VALUES ($1, 'queued')
+		RETURNING id`, documentID).Scan(&jobID)
+	if err != nil {
+		http.Error(w, "no se pudo crear el trabajo", http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		http.Error(w, "no se pudo confirmar el trabajo", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	// 202 Accepted: "recibí tu petición, la voy a procesar, pero no la
@@ -89,7 +119,38 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func ensureDefaultUser(ctx context.Context) (string, error) {
+	email := os.Getenv("DEFAULT_USER_EMAIL")
+	if email == "" {
+		email = "demo@example.com"
+	}
+
+	var userID string
+	err := db.QueryRow(ctx, `
+		INSERT INTO users (email)
+		VALUES ($1)
+		ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
+		RETURNING id`, email).Scan(&userID)
+	return userID, err
+}
+
 func main() {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL no está configurada")
+	}
+
+	var err error
+	db, err = pgxpool.New(context.Background(), databaseURL)
+	if err != nil {
+		log.Fatal("no se pudo crear el pool de PostgreSQL: ", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(context.Background()); err != nil {
+		log.Fatal("no se pudo conectar a PostgreSQL: ", err)
+	}
+
 	// http.HandleFunc registra qué función debe atender cada ruta.
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/upload", uploadHandler)
@@ -99,7 +160,7 @@ func main() {
 	// ListenAndServe bloquea el programa y empieza a atender peticiones.
 	// El segundo argumento nil significa "usa el router por defecto"
 	// (el que llenamos arriba con http.HandleFunc).
-	err := http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
