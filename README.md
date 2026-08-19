@@ -33,6 +33,7 @@ En esta etapa ya estan implementados:
 - Tokens firmados para autorizar operaciones por propietario.
 - Reintentos de trabajos fallidos hasta `max_attempts = 3`.
 - Idempotencia frente a reentregas del mismo `job_id`.
+- Frontend web para registro, login, carga, seguimiento y descarga.
 
 La autenticacion usa tokens con vigencia de 24 horas. Un bundle que no cumpla la estructura o tenga enlaces rotos queda en estado `failed` y no se registra como publicado.
 
@@ -65,6 +66,11 @@ La API debe responder rapidamente despues de registrar y encolar el trabajo. La 
 │   ├── go.mod
 │   ├── go.sum
 │   └── main.go
+├── frontend/
+│   ├── Dockerfile
+│   ├── index.html
+│   ├── styles.css
+│   └── app.js
 ├── worker/
 │   ├── Dockerfile
 │   ├── go.mod
@@ -95,6 +101,7 @@ docker compose up --build
 ```
 
 La API queda disponible en `http://localhost:8080` y PostgreSQL en el puerto `5432`.
+El frontend queda disponible en `http://localhost:3000`.
 
 Para ejecutar los servicios en segundo plano:
 
@@ -109,6 +116,8 @@ docker compose ps
 ```
 
 PostgreSQL debe aparecer como `healthy`.
+
+Abre `http://localhost:3000` para usar el flujo completo desde el navegador.
 
 ## Pruebas actuales
 

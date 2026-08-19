@@ -50,6 +50,19 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // uploadHandler registra los metadatos del documento y crea un trabajo pendiente.
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// Un endpoint de carga solo debe aceptar POST. Si alguien intenta
@@ -407,11 +420,11 @@ func main() {
 	defer jobQueue.Close()
 
 	// http.HandleFunc registra qué función debe atender cada ruta.
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/auth/register", registerHandler)
-	http.HandleFunc("/auth/login", loginHandler)
-	http.HandleFunc("/upload", uploadHandler)
-	http.HandleFunc("/jobs/", jobsHandler)
+	http.Handle("/health", withCORS(http.HandlerFunc(healthHandler)))
+	http.Handle("/auth/register", withCORS(http.HandlerFunc(registerHandler)))
+	http.Handle("/auth/login", withCORS(http.HandlerFunc(loginHandler)))
+	http.Handle("/upload", withCORS(http.HandlerFunc(uploadHandler)))
+	http.Handle("/jobs/", withCORS(http.HandlerFunc(jobsHandler)))
 
 	log.Println("API escuchando en http://localhost:8080")
 
