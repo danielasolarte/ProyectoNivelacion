@@ -31,6 +31,8 @@ En esta etapa ya estan implementados:
 - Registro del bundle en MinIO y actualizacion del trabajo a `completed`.
 - Registro y login de usuarios.
 - Tokens firmados para autorizar operaciones por propietario.
+- Reintentos de trabajos fallidos hasta `max_attempts = 3`.
+- Idempotencia frente a reentregas del mismo `job_id`.
 
 La autenticacion usa tokens con vigencia de 24 horas. Un bundle que no cumpla la estructura o tenga enlaces rotos queda en estado `failed` y no se registra como publicado.
 
@@ -71,7 +73,8 @@ La API debe responder rapidamente despues de registrar y encolar el trabajo. La 
 ├── db/
 │   └── init/
 │       ├── 001_schema.sql
-│       └── 002_auth.sql
+│       ├── 002_auth.sql
+│       └── 003_job_retries.sql
 ├── docker-compose.yml
 ├── prueba.md
 └── README.md
@@ -152,6 +155,8 @@ Respuesta esperada:
 La API registra el usuario autenticado, el documento y el trabajo en una transaccion de PostgreSQL, guarda el archivo original en MinIO y publica el `job_id` en Redis. El worker consume el trabajo y genera el bundle de forma independiente.
 
 El estado final esperado para una carga exitosa es `completed` y el bundle queda registrado en la tabla `bundles`.
+
+Cada trabajo registra `attempts` y `max_attempts`. Si ocurre un fallo antes de publicar el bundle, el worker lo devuelve a `queued` hasta tres veces. Una reentrega de un trabajo ya procesado no crea un segundo bundle.
 
 ### Consultar el estado de un trabajo
 
@@ -249,8 +254,7 @@ documento.md
 
 ## Pendiente
 
-1. Mejorar idempotencia, reintentos y manejo de trabajos fallidos.
-2. Crear el frontend y las pruebas de aislamiento multiusuario.
+1. Crear el frontend y las pruebas de aislamiento multiusuario.
 
 ## Detener los servicios
 

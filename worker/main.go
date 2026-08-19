@@ -72,7 +72,7 @@ func main() {
 
 func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	result, err := jobWorker.db.Exec(ctx, `
-		UPDATE jobs SET status = 'processing', updated_at = NOW()
+		UPDATE jobs SET status = 'processing', attempts = attempts + 1, updated_at = NOW()
 		WHERE id = $1 AND status = 'queued'`, jobID)
 	if err != nil {
 		return err
@@ -80,6 +80,13 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	if result.RowsAffected() == 0 {
 		return nil
 	}
+	var attempts int
+	var maxAttempts int
+	err = jobWorker.db.QueryRow(ctx, `SELECT attempts, max_attempts FROM jobs WHERE id = $1`, jobID).Scan(&attempts, &maxAttempts)
+	if err != nil {
+		return err
+	}
+	log.Printf("procesando trabajo %s, intento %d/%d\n", jobID, attempts, maxAttempts)
 
 	var storageKey string
 	var originalName string
@@ -126,9 +133,24 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 }
 
 func (jobWorker *worker) fail(ctx context.Context, jobID string, cause error) error {
-	_, updateErr := jobWorker.db.Exec(ctx, `UPDATE jobs SET status = 'failed', error_message = $2, updated_at = NOW() WHERE id = $1`, jobID, cause.Error())
+	var nextStatus string
+	updateErr := jobWorker.db.QueryRow(ctx, `
+		UPDATE jobs
+		SET status = CASE WHEN attempts < max_attempts THEN 'queued' ELSE 'failed' END,
+			error_message = $2,
+			updated_at = NOW()
+		WHERE id = $1
+		RETURNING status`, jobID, cause.Error()).Scan(&nextStatus)
 	if updateErr != nil {
 		return fmt.Errorf("%v; además no se pudo marcar como fallido: %w", cause, updateErr)
+	}
+	if nextStatus == "queued" {
+		if err := jobWorker.queue.LPush(ctx, jobWorker.queueName, jobID).Err(); err != nil {
+			return fmt.Errorf("%v; además no se pudo reencolar: %w", cause, err)
+		}
+		log.Printf("trabajo %s reencolado para otro intento\n", jobID)
+	} else {
+		log.Printf("trabajo %s agotó sus reintentos\n", jobID)
 	}
 	return cause
 }
