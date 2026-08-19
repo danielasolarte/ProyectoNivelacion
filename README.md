@@ -15,6 +15,8 @@ En esta etapa ya estan implementados:
 - Conexion de la API con PostgreSQL mediante `pgx`.
 - Endpoint `GET /health`.
 - Endpoint `POST /upload`.
+- Endpoint `GET /jobs/{job_id}` para consultar el estado.
+- Endpoint `GET /jobs/{job_id}/download` para descargar el bundle.
 - Registro de los metadatos del documento en PostgreSQL.
 - Almacenamiento del archivo original en MinIO.
 - Registro de la ruta del objeto en `documents.storage_key`.
@@ -23,10 +25,11 @@ En esta etapa ya estan implementados:
 - Redis como cola de trabajos.
 - Worker independiente en Go.
 - Procesamiento asincrono del trabajo.
+- Segmentacion de documentos Markdown por encabezados.
 - Generacion de un bundle ZIP con `index.md`, `log.md` y `documento.md`.
 - Registro del bundle en MinIO y actualizacion del trabajo a `completed`.
 
-Actualmente se usa el usuario demo `demo@example.com`. La autenticacion real, la segmentacion por secciones y los endpoints de consulta y descarga aun no estan implementados.
+Actualmente se usa el usuario demo `demo@example.com`. La autenticacion real y la validacion formal de enlaces aun no estan implementadas.
 
 ## Arquitectura planificada
 
@@ -132,6 +135,28 @@ La API registra el usuario demo, el documento y el trabajo en una transaccion de
 
 El estado final esperado para una carga exitosa es `completed` y el bundle queda registrado en la tabla `bundles`.
 
+### Consultar el estado de un trabajo
+
+```bash
+curl http://localhost:8080/jobs/<job_id>
+```
+
+Respuesta esperada:
+
+```json
+{"job_id":"<uuid>","original_name":"prueba.md","status":"completed","error":null}
+```
+
+### Descargar el bundle
+
+Solo los trabajos completados permiten descargar el resultado:
+
+```bash
+curl -o bundle.zip http://localhost:8080/jobs/<job_id>/download
+```
+
+El archivo descargado contiene `index.md`, `log.md` y `documento.md`.
+
 ### Consultar las tablas
 
 ```bash
@@ -207,11 +232,9 @@ documento.md
 ## Pendiente
 
 1. Implementar registro, autenticacion y autorizacion por propietario.
-2. Leer y segmentar documentos Markdown por secciones.
-3. Validar formalmente la estructura y los enlaces del bundle.
-4. Agregar consulta de estado y descarga del bundle.
-5. Mejorar idempotencia, reintentos y manejo de trabajos fallidos.
-6. Crear el frontend y las pruebas de aislamiento multiusuario.
+2. Validar formalmente la estructura y los enlaces del bundle.
+3. Mejorar idempotencia, reintentos y manejo de trabajos fallidos.
+4. Crear el frontend y las pruebas de aislamiento multiusuario.
 
 ## Detener los servicios
 

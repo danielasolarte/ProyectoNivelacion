@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
@@ -132,25 +133,64 @@ func (jobWorker *worker) fail(ctx context.Context, jobID string, cause error) er
 func buildBundle(originalName string, source []byte) ([]byte, error) {
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
-	conceptName := "documento.md"
-	index := fmt.Sprintf("# Bundle\n\n- [%s](%s)\n", originalName, conceptName)
-	logContent := fmt.Sprintf("# Conversion log\n\n- Documento original: `%s`\n- Unidades detectadas: 1\n- Validacion: estructura minima correcta\n", originalName)
-	files := map[string][]byte{
-		"index.md":     []byte(index),
-		"log.md":       []byte(logContent),
-		conceptName:    source,
+	concepts := splitMarkdown(source)
+	var index strings.Builder
+	index.WriteString("# Bundle\n\n")
+	for position, concept := range concepts {
+		conceptName := "documento.md"
+		if len(concepts) > 1 {
+			conceptName = fmt.Sprintf("capitulo-%02d.md", position+1)
+		}
+		index.WriteString(fmt.Sprintf("- [Unidad %d](%s)\n", position+1, conceptName))
+		if err := writeZipFile(archive, conceptName, concept); err != nil {
+			return nil, err
+		}
 	}
-	for name, content := range files {
-		entry, err := archive.Create(name)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := entry.Write(content); err != nil {
-			return nil, err
-		}
+	if err := writeZipFile(archive, "index.md", []byte(index.String())); err != nil {
+		return nil, err
+	}
+	logContent := fmt.Sprintf("# Conversion log\n\n- Documento original: `%s`\n- Unidades detectadas: %d\n- Validacion: estructura minima correcta\n", originalName, len(concepts))
+	if err := writeZipFile(archive, "log.md", []byte(logContent)); err != nil {
+		return nil, err
 	}
 	if err := archive.Close(); err != nil {
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+func splitMarkdown(source []byte) [][]byte {
+	text := strings.ReplaceAll(string(source), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	var concepts [][]string
+	current := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		isHeading := strings.HasPrefix(trimmed, "#") && (len(trimmed) == 1 || trimmed[1] == ' ' || trimmed[1] == '#')
+		if isHeading && len(current) > 0 {
+			concepts = append(concepts, current)
+			current = make([]string, 0, len(lines))
+		}
+		current = append(current, line)
+	}
+	if len(current) > 0 {
+		concepts = append(concepts, current)
+	}
+	if len(concepts) == 0 {
+		return [][]byte{source}
+	}
+	result := make([][]byte, 0, len(concepts))
+	for _, concept := range concepts {
+		result = append(result, []byte(strings.Join(concept, "\n")))
+	}
+	return result
+}
+
+func writeZipFile(archive *zip.Writer, name string, content []byte) error {
+	entry, err := archive.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = entry.Write(content)
+	return err
 }

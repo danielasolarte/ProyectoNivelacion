@@ -6,10 +6,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"path"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
@@ -148,6 +150,90 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func jobsHandler(w http.ResponseWriter, r *http.Request) {
+	jobPath := strings.TrimPrefix(r.URL.Path, "/jobs/")
+	parts := strings.Split(strings.Trim(jobPath, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch {
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		jobStatusHandler(w, r, parts[0])
+	case len(parts) == 2 && parts[1] == "download" && r.Method == http.MethodGet:
+		jobDownloadHandler(w, r, parts[0])
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func jobStatusHandler(w http.ResponseWriter, r *http.Request, jobID string) {
+	userID, err := ensureDefaultUser(r.Context())
+	if err != nil {
+		http.Error(w, "no se pudo identificar al usuario", http.StatusInternalServerError)
+		return
+	}
+
+	var originalName string
+	var status string
+	var errorMessage *string
+	err = db.QueryRow(r.Context(), `
+		SELECT d.original_name, j.status, j.error_message
+		FROM jobs j
+		JOIN documents d ON d.id = j.document_id
+		WHERE j.id = $1 AND d.user_id = $2`, jobID, userID).Scan(&originalName, &status, &errorMessage)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"job_id":        jobID,
+		"original_name": originalName,
+		"status":        status,
+		"error":         errorMessage,
+	})
+}
+
+func jobDownloadHandler(w http.ResponseWriter, r *http.Request, jobID string) {
+	userID, err := ensureDefaultUser(r.Context())
+	if err != nil {
+		http.Error(w, "no se pudo identificar al usuario", http.StatusInternalServerError)
+		return
+	}
+
+	var storageKey string
+	err = db.QueryRow(r.Context(), `
+		SELECT b.storage_key
+		FROM bundles b
+		JOIN jobs j ON j.id = b.job_id
+		JOIN documents d ON d.id = j.document_id
+		WHERE b.job_id = $1 AND d.user_id = $2 AND j.status = 'completed'`, jobID, userID).Scan(&storageKey)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	object, err := objectStore.GetObject(r.Context(), objectBucket, storageKey, minio.GetObjectOptions{})
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer object.Close()
+	if _, err := object.Stat(); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="bundle.zip"`)
+	if _, err := io.Copy(w, object); err != nil {
+		log.Printf("error enviando bundle %s: %v\n", jobID, err)
+	}
+}
+
 func ensureDefaultUser(ctx context.Context) (string, error) {
 	email := os.Getenv("DEFAULT_USER_EMAIL")
 	if email == "" {
@@ -214,6 +300,7 @@ func main() {
 	// http.HandleFunc registra qué función debe atender cada ruta.
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/upload", uploadHandler)
+	http.HandleFunc("/jobs/", jobsHandler)
 
 	log.Println("API escuchando en http://localhost:8080")
 
