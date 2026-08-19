@@ -14,11 +14,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/redis/go-redis/v9"
 )
 
 var db *pgxpool.Pool
 var objectStore *minio.Client
 var objectBucket string
+var jobQueue *redis.Client
+var jobQueueName string
 
 // healthHandler responde a peticiones GET /health.
 // En Go, un "handler" HTTP es simplemente una función con esta firma:
@@ -127,6 +130,10 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no se pudo confirmar el trabajo", http.StatusInternalServerError)
 		return
 	}
+	if err := jobQueue.LPush(ctx, jobQueueName, jobID).Err(); err != nil {
+		http.Error(w, "no se pudo encolar el trabajo", http.StatusServiceUnavailable)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	// 202 Accepted: "recibí tu petición, la voy a procesar, pero no la
@@ -193,6 +200,16 @@ func main() {
 			log.Fatal("no se pudo crear el bucket: ", err)
 		}
 	}
+
+	jobQueue = redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ADDR")})
+	jobQueueName = os.Getenv("JOB_QUEUE")
+	if jobQueueName == "" {
+		log.Fatal("JOB_QUEUE no esta configurada")
+	}
+	if err := jobQueue.Ping(context.Background()).Err(); err != nil {
+		log.Fatal("no se pudo conectar a Redis: ", err)
+	}
+	defer jobQueue.Close()
 
 	// http.HandleFunc registra qué función debe atender cada ruta.
 	http.HandleFunc("/health", healthHandler)

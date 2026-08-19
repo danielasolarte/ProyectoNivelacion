@@ -20,15 +20,21 @@ En esta etapa ya estan implementados:
 - Registro de la ruta del objeto en `documents.storage_key`.
 - Creacion de un trabajo con estado `queued`.
 - Generacion de identificadores UUID desde PostgreSQL.
+- Redis como cola de trabajos.
+- Worker independiente en Go.
+- Procesamiento asincrono del trabajo.
+- Generacion de un bundle ZIP con `index.md`, `log.md` y `documento.md`.
+- Registro del bundle en MinIO y actualizacion del trabajo a `completed`.
 
-Actualmente se usa el usuario demo `demo@example.com`. La autenticacion real, el procesamiento asincrono y la generacion del bundle aun no estan implementados.
+Actualmente se usa el usuario demo `demo@example.com`. La autenticacion real, la segmentacion por secciones y los endpoints de consulta y descarga aun no estan implementados.
 
 ## Arquitectura planificada
 
 - **Backend:** API y workers independientes implementados en Go.
-- **Cola de mensajes:** Redis, pendiente de integrar.
+- **Cola de mensajes:** Redis.
 - **Base de datos:** PostgreSQL para metadatos de usuarios, documentos, trabajos y bundles.
 - **Almacenamiento de objetos:** MinIO para documentos originales y bundles.
+- **Worker:** servicio independiente en Go que consume trabajos desde Redis.
 - **Despliegue:** Docker Compose.
 
 El flujo final esperado es:
@@ -47,6 +53,11 @@ La API debe responder rapidamente despues de registrar y encolar el trabajo. La 
 ```text
 .
 ├── api/
+│   ├── Dockerfile
+│   ├── go.mod
+│   ├── go.sum
+│   └── main.go
+├── worker/
 │   ├── Dockerfile
 │   ├── go.mod
 │   ├── go.sum
@@ -117,7 +128,9 @@ Respuesta esperada:
 {"job_id":"<uuid>","status":"queued"}
 ```
 
-La API registra el usuario demo, el documento y el trabajo en una transaccion de PostgreSQL, y guarda el archivo original en MinIO. En esta etapa aun no inicia su conversion.
+La API registra el usuario demo, el documento y el trabajo en una transaccion de PostgreSQL, guarda el archivo original en MinIO y publica el `job_id` en Redis. El worker consume el trabajo y genera el bundle de forma independiente.
+
+El estado final esperado para una carga exitosa es `completed` y el bundle queda registrado en la tabla `bundles`.
 
 ### Consultar las tablas
 
@@ -129,6 +142,12 @@ Consultar los trabajos creados:
 
 ```bash
 docker compose exec postgres psql -U okf -d okf -c "SELECT d.original_name, j.id, j.status FROM documents d JOIN jobs j ON j.document_id = d.id ORDER BY j.created_at DESC;"
+```
+
+Consultar los bundles generados:
+
+```bash
+docker compose exec postgres psql -U okf -d okf -c "SELECT job_id, storage_key, validation_status FROM bundles ORDER BY created_at DESC;"
 ```
 
 ## Base de datos
@@ -171,17 +190,28 @@ users/<user-id>/documents/<document-id>/prueba.md
 
 El volumen Docker `minio_data` conserva los archivos aunque los contenedores se reinicien.
 
+Los bundles se guardan con una ruta similar a:
+
+```text
+bundles/<job-id>/bundle.zip
+```
+
+El ZIP minimo contiene:
+
+```text
+index.md
+log.md
+documento.md
+```
+
 ## Pendiente
 
 1. Implementar registro, autenticacion y autorizacion por propietario.
-2. Agregar Redis y publicar cada trabajo desde la API.
-3. Crear el worker independiente en Go.
-4. Leer y segmentar documentos Markdown.
-5. Generar `index.md`, `log.md` y los documentos de concepto en MinIO.
-6. Validar la estructura y los enlaces del bundle.
-7. Agregar consulta de estado y descarga del bundle.
-8. Implementar idempotencia y reintentos.
-9. Crear el frontend y las pruebas de aislamiento multiusuario.
+2. Leer y segmentar documentos Markdown por secciones.
+3. Validar formalmente la estructura y los enlaces del bundle.
+4. Agregar consulta de estado y descarga del bundle.
+5. Mejorar idempotencia, reintentos y manejo de trabajos fallidos.
+6. Crear el frontend y las pruebas de aislamiento multiusuario.
 
 ## Detener los servicios
 

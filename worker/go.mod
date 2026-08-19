@@ -1,4 +1,4 @@
-module okf/api
+module okf/worker
 
 go 1.23.0
 
