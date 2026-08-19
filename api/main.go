@@ -5,18 +5,24 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var db *pgxpool.Pool
@@ -24,6 +30,7 @@ var objectStore *minio.Client
 var objectBucket string
 var jobQueue *redis.Client
 var jobQueueName string
+var authSecret []byte
 
 // healthHandler responde a peticiones GET /health.
 // En Go, un "handler" HTTP es simplemente una función con esta firma:
@@ -78,9 +85,9 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("archivo recibido: %s (%d bytes)\n", header.Filename, header.Size)
 
 	ctx := r.Context()
-	userID, err := ensureDefaultUser(ctx)
+	userID, err := authenticatedUserID(r)
 	if err != nil {
-		http.Error(w, "no se pudo identificar al usuario: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
 		return
 	}
 
@@ -168,10 +175,76 @@ func jobsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func jobStatusHandler(w http.ResponseWriter, r *http.Request, jobID string) {
-	userID, err := ensureDefaultUser(r.Context())
+func registerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "método no permitido, usa POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var input struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Email == "" || len(input.Password) < 8 {
+		http.Error(w, "email y contraseña de al menos 8 caracteres son obligatorios", http.StatusBadRequest)
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
-		http.Error(w, "no se pudo identificar al usuario", http.StatusInternalServerError)
+		http.Error(w, "no se pudo proteger la contraseña", http.StatusInternalServerError)
+		return
+	}
+	var userID string
+	err = db.QueryRow(r.Context(), `
+		INSERT INTO users (email, password_hash)
+		VALUES ($1, $2)
+		RETURNING id`, strings.ToLower(strings.TrimSpace(input.Email)), string(hash)).Scan(&userID)
+	if err != nil {
+		http.Error(w, "el email ya está registrado", http.StatusConflict)
+		return
+	}
+	token, err := createToken(userID)
+	if err != nil {
+		http.Error(w, "no se pudo crear la sesión", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"user_id": userID, "token": token})
+}
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "método no permitido, usa POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var input struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "cuerpo JSON inválido", http.StatusBadRequest)
+		return
+	}
+	var userID string
+	var passwordHash *string
+	err := db.QueryRow(r.Context(), `SELECT id, password_hash FROM users WHERE email = $1`, strings.ToLower(strings.TrimSpace(input.Email))).Scan(&userID, &passwordHash)
+	if err != nil || passwordHash == nil || bcrypt.CompareHashAndPassword([]byte(*passwordHash), []byte(input.Password)) != nil {
+		http.Error(w, "credenciales inválidas", http.StatusUnauthorized)
+		return
+	}
+	token, err := createToken(userID)
+	if err != nil {
+		http.Error(w, "no se pudo crear la sesión", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"user_id": userID, "token": token})
+}
+
+func jobStatusHandler(w http.ResponseWriter, r *http.Request, jobID string) {
+	userID, err := authenticatedUserID(r)
+	if err != nil {
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
 		return
 	}
 
@@ -198,9 +271,9 @@ func jobStatusHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 }
 
 func jobDownloadHandler(w http.ResponseWriter, r *http.Request, jobID string) {
-	userID, err := ensureDefaultUser(r.Context())
+	userID, err := authenticatedUserID(r)
 	if err != nil {
-		http.Error(w, "no se pudo identificar al usuario", http.StatusInternalServerError)
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
 		return
 	}
 
@@ -234,19 +307,51 @@ func jobDownloadHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 	}
 }
 
-func ensureDefaultUser(ctx context.Context) (string, error) {
-	email := os.Getenv("DEFAULT_USER_EMAIL")
-	if email == "" {
-		email = "demo@example.com"
+func authenticatedUserID(r *http.Request) (string, error) {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return "", errors.New("token ausente")
 	}
+	return parseToken(strings.TrimPrefix(header, "Bearer "))
+}
 
-	var userID string
-	err := db.QueryRow(ctx, `
-		INSERT INTO users (email)
-		VALUES ($1)
-		ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email
-		RETURNING id`, email).Scan(&userID)
-	return userID, err
+func createToken(userID string) (string, error) {
+	header, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(map[string]any{"sub": userID, "exp": time.Now().Add(24 * time.Hour).Unix()})
+	if err != nil {
+		return "", err
+	}
+	encodedHeader := base64.RawURLEncoding.EncodeToString(header)
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	message := encodedHeader + "." + encodedPayload
+	mac := hmac.New(sha256.New, authSecret)
+	mac.Write([]byte(message))
+	return message + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func parseToken(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", errors.New("token inválido")
+	}
+	mac := hmac.New(sha256.New, authSecret)
+	mac.Write([]byte(parts[0] + "." + parts[1]))
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !hmac.Equal(signature, mac.Sum(nil)) {
+		return "", errors.New("firma inválida")
+	}
+	var payload struct {
+		Subject string `json:"sub"`
+		Expires int64  `json:"exp"`
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || json.Unmarshal(decoded, &payload) != nil || payload.Subject == "" || payload.Expires < time.Now().Unix() {
+		return "", errors.New("token expirado o inválido")
+	}
+	return payload.Subject, nil
 }
 
 func main() {
@@ -264,6 +369,10 @@ func main() {
 
 	if err := db.Ping(context.Background()); err != nil {
 		log.Fatal("no se pudo conectar a PostgreSQL: ", err)
+	}
+	authSecret = []byte(os.Getenv("AUTH_SECRET"))
+	if len(authSecret) < 16 {
+		log.Fatal("AUTH_SECRET debe tener al menos 16 caracteres")
 	}
 
 	objectStore, err = minio.New(os.Getenv("OBJECT_STORAGE_ENDPOINT"), &minio.Options{
@@ -299,6 +408,8 @@ func main() {
 
 	// http.HandleFunc registra qué función debe atender cada ruta.
 	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/auth/register", registerHandler)
+	http.HandleFunc("/auth/login", loginHandler)
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/jobs/", jobsHandler)
 

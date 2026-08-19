@@ -27,9 +27,12 @@ En esta etapa ya estan implementados:
 - Procesamiento asincrono del trabajo.
 - Segmentacion de documentos Markdown por encabezados.
 - Generacion de un bundle ZIP con `index.md`, `log.md` y `documento.md`.
+- Validacion de la estructura minima y de los enlaces de `index.md` antes de publicar.
 - Registro del bundle en MinIO y actualizacion del trabajo a `completed`.
+- Registro y login de usuarios.
+- Tokens firmados para autorizar operaciones por propietario.
 
-Actualmente se usa el usuario demo `demo@example.com`. La autenticacion real y la validacion formal de enlaces aun no estan implementadas.
+La autenticacion usa tokens con vigencia de 24 horas. Un bundle que no cumpla la estructura o tenga enlaces rotos queda en estado `failed` y no se registra como publicado.
 
 ## Arquitectura planificada
 
@@ -67,7 +70,8 @@ La API debe responder rapidamente despues de registrar y encolar el trabajo. La 
 │   └── main.go
 ├── db/
 │   └── init/
-│       └── 001_schema.sql
+│       ├── 001_schema.sql
+│       └── 002_auth.sql
 ├── docker-compose.yml
 ├── prueba.md
 └── README.md
@@ -117,12 +121,26 @@ Respuesta esperada:
 {"status":"ok","service":"api"}
 ```
 
+### Registrar un usuario
+
+```bash
+curl -X POST http://localhost:8080/auth/register -H "Content-Type: application/json" -d "{\"email\":\"ana@example.com\",\"password\":\"password123\"}"
+```
+
+La respuesta incluye un `token`. Debe enviarse como `Bearer` en las operaciones protegidas.
+
+### Iniciar sesión
+
+```bash
+curl -X POST http://localhost:8080/auth/login -H "Content-Type: application/json" -d "{\"email\":\"ana@example.com\",\"password\":\"password123\"}"
+```
+
 ### Cargar un documento
 
 El campo multipart debe llamarse `document`:
 
 ```bash
-curl -X POST http://localhost:8080/upload -F "document=@prueba.md"
+curl -X POST http://localhost:8080/upload -H "Authorization: Bearer <token>" -F "document=@prueba.md"
 ```
 
 Respuesta esperada:
@@ -131,14 +149,14 @@ Respuesta esperada:
 {"job_id":"<uuid>","status":"queued"}
 ```
 
-La API registra el usuario demo, el documento y el trabajo en una transaccion de PostgreSQL, guarda el archivo original en MinIO y publica el `job_id` en Redis. El worker consume el trabajo y genera el bundle de forma independiente.
+La API registra el usuario autenticado, el documento y el trabajo en una transaccion de PostgreSQL, guarda el archivo original en MinIO y publica el `job_id` en Redis. El worker consume el trabajo y genera el bundle de forma independiente.
 
 El estado final esperado para una carga exitosa es `completed` y el bundle queda registrado en la tabla `bundles`.
 
 ### Consultar el estado de un trabajo
 
 ```bash
-curl http://localhost:8080/jobs/<job_id>
+curl http://localhost:8080/jobs/<job_id> -H "Authorization: Bearer <token>"
 ```
 
 Respuesta esperada:
@@ -152,7 +170,7 @@ Respuesta esperada:
 Solo los trabajos completados permiten descargar el resultado:
 
 ```bash
-curl -o bundle.zip http://localhost:8080/jobs/<job_id>/download
+curl -o bundle.zip http://localhost:8080/jobs/<job_id>/download -H "Authorization: Bearer <token>"
 ```
 
 El archivo descargado contiene `index.md`, `log.md` y `documento.md`.
@@ -231,10 +249,8 @@ documento.md
 
 ## Pendiente
 
-1. Implementar registro, autenticacion y autorizacion por propietario.
-2. Validar formalmente la estructura y los enlaces del bundle.
-3. Mejorar idempotencia, reintentos y manejo de trabajos fallidos.
-4. Crear el frontend y las pruebas de aislamiento multiusuario.
+1. Mejorar idempotencia, reintentos y manejo de trabajos fallidos.
+2. Crear el frontend y las pruebas de aislamiento multiusuario.
 
 ## Detener los servicios
 

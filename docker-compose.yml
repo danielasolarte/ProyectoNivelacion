@@ -52,6 +52,7 @@ services:
       OBJECT_STORAGE_BUCKET: documents
       REDIS_ADDR: redis:6379
       JOB_QUEUE: okf:jobs
+      AUTH_SECRET: local-development-secret-change-me
     depends_on:
       postgres:
         condition: service_healthy

@@ -105,6 +105,9 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	if err != nil {
 		return jobWorker.fail(ctx, jobID, err)
 	}
+	if err := validateBundle(bundle); err != nil {
+		return jobWorker.fail(ctx, jobID, err)
+	}
 	bundleKey := path.Join("bundles", jobID, "bundle.zip")
 	_, err = jobWorker.objectStore.PutObject(ctx, jobWorker.bucket, bundleKey, bytes.NewReader(bundle), int64(len(bundle)), minio.PutObjectOptions{ContentType: "application/zip"})
 	if err != nil {
@@ -193,4 +196,57 @@ func writeZipFile(archive *zip.Writer, name string, content []byte) error {
 	}
 	_, err = entry.Write(content)
 	return err
+}
+
+func validateBundle(bundle []byte) error {
+	archive, err := zip.NewReader(bytes.NewReader(bundle), int64(len(bundle)))
+	if err != nil {
+		return fmt.Errorf("bundle inválido: no es un ZIP válido")
+	}
+
+	files := make(map[string][]byte, len(archive.File))
+	for _, file := range archive.File {
+		reader, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("bundle inválido: no se pudo leer %s", file.Name)
+		}
+		content, readErr := io.ReadAll(reader)
+		reader.Close()
+		if readErr != nil {
+			return fmt.Errorf("bundle inválido: no se pudo leer %s", file.Name)
+		}
+		files[file.Name] = content
+	}
+	if _, ok := files["index.md"]; !ok {
+		return fmt.Errorf("bundle inválido: falta index.md")
+	}
+	if _, ok := files["log.md"]; !ok {
+		return fmt.Errorf("bundle inválido: falta log.md")
+	}
+	conceptCount := 0
+	for name := range files {
+		if strings.HasSuffix(name, ".md") && name != "index.md" && name != "log.md" {
+			conceptCount++
+		}
+	}
+	if conceptCount == 0 {
+		return fmt.Errorf("bundle inválido: no contiene conceptos Markdown")
+	}
+
+	for _, line := range strings.Split(string(files["index.md"]), "\n") {
+		start := strings.Index(line, "](")
+		if start == -1 {
+			continue
+		}
+		start += 2
+		end := strings.Index(line[start:], ")")
+		if end == -1 {
+			return fmt.Errorf("bundle inválido: enlace sin cierre en index.md")
+		}
+		target := line[start : start+end]
+		if _, ok := files[target]; !ok {
+			return fmt.Errorf("bundle inválido: el enlace %s no existe", target)
+		}
+	}
+	return nil
 }
