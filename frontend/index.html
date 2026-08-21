@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OKF Studio</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">OK</span><span>OKF Studio <b>♡</b></span></div>
+      <span id="connection" class="status-dot">Offline</span>
+    </header>
+
+    <section class="intro">
+      <p class="eyebrow">A TINY DOCUMENT CLOUD</p>
+      <h1>Your docs, but cuter.</h1>
+      <p class="lede">Give your little Markdown document a cozy home and watch it become a knowledge bundle. uwu</p>
+      <div class="mascot" aria-hidden="true"><span class="mascot-face">^w^</span><span class="mascot-note">ready! ✿</span></div>
+    </section>
+
+    <section id="auth-panel" class="panel auth-panel">
+      <div class="panel-heading"><span class="step">01 ♡</span><h2>Come on in</h2></div>
+      <div class="auth-grid">
+        <form id="login-form">
+          <label>Email<input id="login-email" type="email" required placeholder="you@example.com"></label>
+          <label>Password<input id="login-password" type="password" required minlength="8" placeholder="8+ characters"></label>
+          <button type="submit">Sign in ♡ <span>-></span></button>
+        </form>
+        <form id="register-form" class="register-form">
+          <label>Create account<input id="register-email" type="email" required placeholder="new@example.com"></label>
+          <label>Password<input id="register-password" type="password" required minlength="8" placeholder="8+ characters"></label>
+          <button class="secondary" type="submit">Make an account ✿ <span>+</span></button>
+        </form>
+      </div>
+      <p id="auth-message" class="message"></p>
+    </section>
+
+    <section id="workspace" class="workspace hidden">
+      <div class="workspace-header">
+        <div><p class="eyebrow">READY WHEN YOU ARE ✦</p><h2>New little document</h2></div>
+        <button id="logout" class="text-button">Bye for now ♡</button>
+      </div>
+      <form id="upload-form" class="upload-zone">
+        <input id="document" type="file" accept=".md,.markdown,.txt" required>
+        <label for="document" class="file-picker"><span class="upload-icon">✿</span><strong id="file-name">Choose a tiny Markdown file</strong><small>Markdown or plain text, no worries</small></label>
+        <button type="submit">Make my bundle ✦ <span>-></span></button>
+      </form>
+      <div id="job-card" class="job-card hidden">
+        <div class="job-top"><span class="eyebrow">LATEST JOB</span><span id="job-status" class="pill">queued</span></div>
+        <h3 id="job-name">document.md</h3>
+        <p id="job-id" class="job-id"></p>
+        <div class="progress"><span id="progress-bar"></span></div>
+        <p id="job-message" class="message"></p>
+        <a id="download" class="download hidden" href="#">Take my cute bundle.zip <span>↓</span></a>
+      </div>
+    </section>
+  </main>
+  <script src="app.js?v=2"></script>
+</body>
+</html>

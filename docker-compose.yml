@@ -52,6 +52,7 @@ services:
       OBJECT_STORAGE_BUCKET: documents
       REDIS_ADDR: redis:6379
       JOB_QUEUE: okf:jobs
+      AUTH_SECRET: local-development-secret-change-me
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +79,14 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
 
 volumes:
   postgres_data:

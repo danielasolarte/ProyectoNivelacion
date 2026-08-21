@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
@@ -71,7 +72,7 @@ func main() {
 
 func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	result, err := jobWorker.db.Exec(ctx, `
-		UPDATE jobs SET status = 'processing', updated_at = NOW()
+		UPDATE jobs SET status = 'processing', attempts = attempts + 1, updated_at = NOW()
 		WHERE id = $1 AND status = 'queued'`, jobID)
 	if err != nil {
 		return err
@@ -79,6 +80,13 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	if result.RowsAffected() == 0 {
 		return nil
 	}
+	var attempts int
+	var maxAttempts int
+	err = jobWorker.db.QueryRow(ctx, `SELECT attempts, max_attempts FROM jobs WHERE id = $1`, jobID).Scan(&attempts, &maxAttempts)
+	if err != nil {
+		return err
+	}
+	log.Printf("procesando trabajo %s, intento %d/%d\n", jobID, attempts, maxAttempts)
 
 	var storageKey string
 	var originalName string
@@ -104,6 +112,9 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	if err != nil {
 		return jobWorker.fail(ctx, jobID, err)
 	}
+	if err := validateBundle(bundle); err != nil {
+		return jobWorker.fail(ctx, jobID, err)
+	}
 	bundleKey := path.Join("bundles", jobID, "bundle.zip")
 	_, err = jobWorker.objectStore.PutObject(ctx, jobWorker.bucket, bundleKey, bytes.NewReader(bundle), int64(len(bundle)), minio.PutObjectOptions{ContentType: "application/zip"})
 	if err != nil {
@@ -122,9 +133,24 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 }
 
 func (jobWorker *worker) fail(ctx context.Context, jobID string, cause error) error {
-	_, updateErr := jobWorker.db.Exec(ctx, `UPDATE jobs SET status = 'failed', error_message = $2, updated_at = NOW() WHERE id = $1`, jobID, cause.Error())
+	var nextStatus string
+	updateErr := jobWorker.db.QueryRow(ctx, `
+		UPDATE jobs
+		SET status = CASE WHEN attempts < max_attempts THEN 'queued' ELSE 'failed' END,
+			error_message = $2,
+			updated_at = NOW()
+		WHERE id = $1
+		RETURNING status`, jobID, cause.Error()).Scan(&nextStatus)
 	if updateErr != nil {
 		return fmt.Errorf("%v; además no se pudo marcar como fallido: %w", cause, updateErr)
+	}
+	if nextStatus == "queued" {
+		if err := jobWorker.queue.LPush(ctx, jobWorker.queueName, jobID).Err(); err != nil {
+			return fmt.Errorf("%v; además no se pudo reencolar: %w", cause, err)
+		}
+		log.Printf("trabajo %s reencolado para otro intento\n", jobID)
+	} else {
+		log.Printf("trabajo %s agotó sus reintentos\n", jobID)
 	}
 	return cause
 }
@@ -132,25 +158,117 @@ func (jobWorker *worker) fail(ctx context.Context, jobID string, cause error) er
 func buildBundle(originalName string, source []byte) ([]byte, error) {
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
-	conceptName := "documento.md"
-	index := fmt.Sprintf("# Bundle\n\n- [%s](%s)\n", originalName, conceptName)
-	logContent := fmt.Sprintf("# Conversion log\n\n- Documento original: `%s`\n- Unidades detectadas: 1\n- Validacion: estructura minima correcta\n", originalName)
-	files := map[string][]byte{
-		"index.md":     []byte(index),
-		"log.md":       []byte(logContent),
-		conceptName:    source,
+	concepts := splitMarkdown(source)
+	var index strings.Builder
+	index.WriteString("# Bundle\n\n")
+	for position, concept := range concepts {
+		conceptName := "documento.md"
+		if len(concepts) > 1 {
+			conceptName = fmt.Sprintf("capitulo-%02d.md", position+1)
+		}
+		index.WriteString(fmt.Sprintf("- [Unidad %d](%s)\n", position+1, conceptName))
+		if err := writeZipFile(archive, conceptName, concept); err != nil {
+			return nil, err
+		}
 	}
-	for name, content := range files {
-		entry, err := archive.Create(name)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := entry.Write(content); err != nil {
-			return nil, err
-		}
+	if err := writeZipFile(archive, "index.md", []byte(index.String())); err != nil {
+		return nil, err
+	}
+	logContent := fmt.Sprintf("# Conversion log\n\n- Documento original: `%s`\n- Unidades detectadas: %d\n- Validacion: estructura minima correcta\n", originalName, len(concepts))
+	if err := writeZipFile(archive, "log.md", []byte(logContent)); err != nil {
+		return nil, err
 	}
 	if err := archive.Close(); err != nil {
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+func splitMarkdown(source []byte) [][]byte {
+	text := strings.ReplaceAll(string(source), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	var concepts [][]string
+	current := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		isHeading := strings.HasPrefix(trimmed, "#") && (len(trimmed) == 1 || trimmed[1] == ' ' || trimmed[1] == '#')
+		if isHeading && len(current) > 0 {
+			concepts = append(concepts, current)
+			current = make([]string, 0, len(lines))
+		}
+		current = append(current, line)
+	}
+	if len(current) > 0 {
+		concepts = append(concepts, current)
+	}
+	if len(concepts) == 0 {
+		return [][]byte{source}
+	}
+	result := make([][]byte, 0, len(concepts))
+	for _, concept := range concepts {
+		result = append(result, []byte(strings.Join(concept, "\n")))
+	}
+	return result
+}
+
+func writeZipFile(archive *zip.Writer, name string, content []byte) error {
+	entry, err := archive.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = entry.Write(content)
+	return err
+}
+
+func validateBundle(bundle []byte) error {
+	archive, err := zip.NewReader(bytes.NewReader(bundle), int64(len(bundle)))
+	if err != nil {
+		return fmt.Errorf("bundle inválido: no es un ZIP válido")
+	}
+
+	files := make(map[string][]byte, len(archive.File))
+	for _, file := range archive.File {
+		reader, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("bundle inválido: no se pudo leer %s", file.Name)
+		}
+		content, readErr := io.ReadAll(reader)
+		reader.Close()
+		if readErr != nil {
+			return fmt.Errorf("bundle inválido: no se pudo leer %s", file.Name)
+		}
+		files[file.Name] = content
+	}
+	if _, ok := files["index.md"]; !ok {
+		return fmt.Errorf("bundle inválido: falta index.md")
+	}
+	if _, ok := files["log.md"]; !ok {
+		return fmt.Errorf("bundle inválido: falta log.md")
+	}
+	conceptCount := 0
+	for name := range files {
+		if strings.HasSuffix(name, ".md") && name != "index.md" && name != "log.md" {
+			conceptCount++
+		}
+	}
+	if conceptCount == 0 {
+		return fmt.Errorf("bundle inválido: no contiene conceptos Markdown")
+	}
+
+	for _, line := range strings.Split(string(files["index.md"]), "\n") {
+		start := strings.Index(line, "](")
+		if start == -1 {
+			continue
+		}
+		start += 2
+		end := strings.Index(line[start:], ")")
+		if end == -1 {
+			return fmt.Errorf("bundle inválido: enlace sin cierre en index.md")
+		}
+		target := line[start : start+end]
+		if _, ok := files[target]; !ok {
+			return fmt.Errorf("bundle inválido: el enlace %s no existe", target)
+		}
+	}
+	return nil
 }
