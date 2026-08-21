@@ -24,6 +24,7 @@ CREATE TABLE jobs (
     error_message TEXT,
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+    retried_from_job_id UUID REFERENCES jobs(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
