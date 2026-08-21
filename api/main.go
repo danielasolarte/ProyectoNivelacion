@@ -50,6 +50,56 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+
+// metricsHandler
+func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	rows, err := db.Query(ctx, `SELECT status, COUNT(*) FROM jobs GROUP BY status`)
+	if err != nil {
+		http.Error(w, "no se pudieron calcular las métricas", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	jobsByStatus := map[string]int{}
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			http.Error(w, "no se pudieron leer las métricas", http.StatusInternalServerError)
+			return
+		}
+		jobsByStatus[status] = count
+	}
+
+	var avgSeconds *float64
+	err = db.QueryRow(ctx, `
+		SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)))
+		FROM jobs WHERE status = 'completed'`).Scan(&avgSeconds)
+	if err != nil {
+		http.Error(w, "no se pudo calcular el tiempo promedio", http.StatusInternalServerError)
+		return
+	}
+
+	var jobsRetried int
+	err = db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM jobs WHERE retried_from_job_id IS NOT NULL`).Scan(&jobsRetried)
+	if err != nil {
+		http.Error(w, "no se pudo contar los reintentos", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"jobs_by_status":         jobsByStatus,
+		"avg_processing_seconds": avgSeconds,
+		"jobs_retried":           jobsRetried,
+	})
+}
+
+
+
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
@@ -479,6 +529,7 @@ func main() {
 	http.Handle("/auth/login", withCORS(http.HandlerFunc(loginHandler)))
 	http.Handle("/upload", withCORS(http.HandlerFunc(uploadHandler)))
 	http.Handle("/jobs/", withCORS(http.HandlerFunc(jobsHandler)))
+	http.Handle("/metrics", withCORS(http.HandlerFunc(metricsHandler)))
 
 	log.Println("API escuchando en http://localhost:8080")
 
