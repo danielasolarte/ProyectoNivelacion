@@ -183,6 +183,8 @@ func jobsHandler(w http.ResponseWriter, r *http.Request) {
 		jobStatusHandler(w, r, parts[0])
 	case len(parts) == 2 && parts[1] == "download" && r.Method == http.MethodGet:
 		jobDownloadHandler(w, r, parts[0])
+	case len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost:
+		jobRetryHandler(w, r, parts[0])
 	default:
 		http.NotFound(w, r)
 	}
@@ -318,6 +320,58 @@ func jobDownloadHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 	if _, err := io.Copy(w, object); err != nil {
 		log.Printf("error enviando bundle %s: %v\n", jobID, err)
 	}
+}
+
+// jobRetryHandler crea un job nuevo vinculado a un job que falló, para
+// reintentarlo. No modifica el job original: crea uno nuevo, vinculado
+// por retried_from_job_id, para dejar trazabilidad de que es un reintento.
+func jobRetryHandler(w http.ResponseWriter, r *http.Request, jobID string) {
+	userID, err := authenticatedUserID(r)
+	if err != nil {
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Buscamos el job original, pero SOLO si es del usuario autenticado
+	// (mismo patrón de aislamiento que ya usas en jobStatusHandler:
+	// el JOIN con documents y el WHERE d.user_id = $2) y SOLO si está
+	// en estado 'failed'. Si no cumple, devolvemos 404: no le decimos
+	// al cliente si el job existe pero no es suyo, o si no está failed.
+	var documentID string
+	err = db.QueryRow(ctx, `
+		SELECT j.document_id
+		FROM jobs j
+		JOIN documents d ON d.id = j.document_id
+		WHERE j.id = $1 AND d.user_id = $2 AND j.status = 'failed'`, jobID, userID).Scan(&documentID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	var newJobID string
+	err = db.QueryRow(ctx, `
+		INSERT INTO jobs (document_id, status, retried_from_job_id)
+		VALUES ($1, 'queued', $2)
+		RETURNING id`, documentID, jobID).Scan(&newJobID)
+	if err != nil {
+		http.Error(w, "no se pudo crear el reintento", http.StatusInternalServerError)
+		return
+	}
+
+	if err := jobQueue.LPush(ctx, jobQueueName, newJobID).Err(); err != nil {
+		http.Error(w, "no se pudo encolar el reintento", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{
+		"job_id":              newJobID,
+		"status":              "queued",
+		"retried_from_job_id": jobID,
+	})
 }
 
 func authenticatedUserID(r *http.Request) (string, error) {
