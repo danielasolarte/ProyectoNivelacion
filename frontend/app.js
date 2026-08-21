@@ -13,7 +13,6 @@ function showWorkspace() {
   workspace.classList.toggle('hidden', !token);
 }
 
-
 async function readBody(response) {
   const text = await response.text();
   try {
@@ -47,6 +46,7 @@ $('upload-form').addEventListener('submit', async (event) => {
   const { data, message } = await readBody(response);
   if (!response.ok) { $('job-message').textContent = message || 'No se pudo subir el documento.'; return; }
   $('job-card').classList.remove('hidden'); $('job-name').textContent = file.name; $('job-id').textContent = data.job_id; $('download').classList.add('hidden'); $('retry').classList.add('hidden'); poll(data.job_id);
+});
 
 async function poll(jobId) {
   clearTimeout(pollTimer);
