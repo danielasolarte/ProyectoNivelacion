@@ -235,10 +235,16 @@ func jobsHandler(w http.ResponseWriter, r *http.Request) {
 		jobDownloadHandler(w, r, parts[0])
 	case len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost:
 		jobRetryHandler(w, r, parts[0])
+	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
+		jobCancelHandler(w, r, parts[0])
 	default:
 		http.NotFound(w, r)
 	}
 }
+
+
+
+
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -421,6 +427,47 @@ func jobRetryHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 		"job_id":              newJobID,
 		"status":              "queued",
 		"retried_from_job_id": jobID,
+	})
+}
+
+
+// jobCancelHandler cancela un job que todavía está en queued o processing.
+// Si el job está queued, el worker nunca lo va a tomar (process() solo
+// reclama jobs con status='queued'). Si está processing, el worker sigue
+// trabajando en él pero, al terminar, va a revisar de nuevo el estado
+// antes de marcarlo completed — si ya está cancelled, no lo publica.
+func jobCancelHandler(w http.ResponseWriter, r *http.Request, jobID string) {
+	userID, err := authenticatedUserID(r)
+	if err != nil {
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+
+	ctx := r.Context()
+
+	// UPDATE ... WHERE ... AND status IN (...) es el mismo patrón de
+	// idempotencia/aislamiento que ya usa jobRetryHandler y process()
+	// en el worker: solo modifica la fila si cumple TODAS las
+	// condiciones a la vez (es tuyo, y está en un estado cancelable).
+	result, err := db.Exec(ctx, `
+		UPDATE jobs j
+		SET status = 'cancelled', updated_at = NOW()
+		FROM documents d
+		WHERE j.id = $1 AND j.document_id = d.id AND d.user_id = $2
+		  AND j.status IN ('queued', 'processing')`, jobID, userID)
+	if err != nil {
+		http.Error(w, "no se pudo cancelar el trabajo", http.StatusInternalServerError)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"job_id": jobID,
+		"status": "cancelled",
 	})
 }
 

@@ -128,8 +128,18 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	if err != nil {
 		return jobWorker.fail(ctx, jobID, err)
 	}
-	_, err = jobWorker.db.Exec(ctx, `UPDATE jobs SET status = 'completed', updated_at = NOW() WHERE id = $1`, jobID)
-	return err
+	
+	result, err = jobWorker.db.Exec(ctx, `
+	UPDATE jobs SET status = 'completed', updated_at = NOW()
+	WHERE id = $1 AND status = 'processing'`, jobID)
+
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		log.Printf("trabajo %s no se marcó completed (probablemente fue cancelado mientras se procesaba)\n", jobID)
+	}
+	return nil
 }
 
 func (jobWorker *worker) fail(ctx context.Context, jobID string, cause error) error {
