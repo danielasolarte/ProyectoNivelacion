@@ -45,7 +45,7 @@ $('upload-form').addEventListener('submit', async (event) => {
   const response = await fetch(`${API}/upload`, {method: 'POST', headers: {Authorization: `Bearer ${token}`}, body: form});
   const { data, message } = await readBody(response);
   if (!response.ok) { $('job-message').textContent = message || 'No se pudo subir el documento.'; return; }
-  $('job-card').classList.remove('hidden'); $('job-name').textContent = file.name; $('job-id').textContent = data.job_id; $('download').classList.add('hidden'); $('retry').classList.add('hidden'); poll(data.job_id);
+  $('job-card').classList.remove('hidden'); $('job-name').textContent = file.name; $('job-id').textContent = data.job_id; $('download').classList.add('hidden'); $('retry').classList.add('hidden'); $('cancel-job').classList.add('hidden'); poll(data.job_id);
 });
 
 async function poll(jobId) {
@@ -54,11 +54,16 @@ async function poll(jobId) {
   if (!response.ok) return;
   const { data: job } = await readBody(response);
   if (!job) return;
-  $('job-status').textContent = job.status; $('job-message').textContent = job.error || (job.status === 'completed' ? 'Bundle validated and ready.' : 'Worker is processing the document...');
-  $('progress-bar').style.width = job.status === 'completed' ? '100%' : job.status === 'failed' ? '100%' : job.status === 'processing' ? '65%' : '30%';
+  $('job-status').textContent = job.status; $('job-message').textContent = job.error || (job.status === 'completed' ? 'Bundle validated and ready.' : job.status === 'cancelled' ? 'Este trabajo fue cancelado.' : 'Worker is processing the document...');
+  $('progress-bar').style.width = job.status === 'completed' ? '100%' : (job.status === 'failed' || job.status === 'cancelled') ? '100%' : job.status === 'processing' ? '65%' : '30%';
+  const cancelable = job.status === 'queued' || job.status === 'processing';
+  $('cancel-job').classList.toggle('hidden', !cancelable);
+  $('cancel-job').dataset.jobId = jobId;
   if (job.status === 'completed') { $('download').dataset.jobId = jobId; $('download').classList.remove('hidden'); $('retry').classList.add('hidden'); return; }
   if (job.status === 'failed') { $('retry').dataset.jobId = jobId; $('retry').classList.remove('hidden'); return; }
-  if (job.status !== 'failed') pollTimer = setTimeout(() => poll(jobId), 800);
+  if (job.status === 'cancelled') { return; }
+  pollTimer = setTimeout(() => poll(jobId), 800);
+
 }
 
 $('download').addEventListener('click', async (event) => {
@@ -86,6 +91,15 @@ $('retry').addEventListener('click', async () => {
   $('retry').classList.add('hidden');
   $('job-id').textContent = data.job_id;
   poll(data.job_id);
+});
+
+$('cancel-job').addEventListener('click', async () => {
+  const jobId = $('cancel-job').dataset.jobId;
+  if (!token || !jobId) return;
+  const response = await fetch(`${API}/jobs/${jobId}/cancel`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+  const { message } = await readBody(response);
+  if (!response.ok) { $('job-message').textContent = message || 'No se pudo cancelar el trabajo.'; return; }
+  poll(jobId);
 });
 
 fetch(`${API}/health`).then((response) => { if (response.ok) $('connection').textContent = 'Online'; }).catch(() => {});
