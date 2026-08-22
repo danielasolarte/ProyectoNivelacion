@@ -31,11 +31,15 @@ En esta etapa ya estan implementados:
 - Registro del bundle en MinIO y actualizacion del trabajo a `completed`.
 - Registro y login de usuarios.
 - Tokens firmados para autorizar operaciones por propietario.
-- Reintentos de trabajos fallidos hasta `max_attempts = 3`.
+- Reintentos automaticos de trabajos fallidos hasta `max_attempts = 3` (tolerancia a fallos interna del worker).
 - Idempotencia frente a reentregas del mismo `job_id`.
-- Frontend web para registro, login, carga, seguimiento y descarga.
+- Endpoint `POST /jobs/{job_id}/retry` para reintentar manualmente un trabajo en `failed`, vinculado al trabajo original mediante la columna `retried_from_job_id`.
+- Endpoint `POST /jobs/{job_id}/cancel` para cancelar un trabajo mientras esta en `queued` o `processing`. El worker respeta la cancelacion incluso si ya estaba procesando el trabajo: no publica el resultado si el estado cambio a `cancelled` mientras tanto.
+- Endpoint `GET /metrics` (sin autenticacion, informacion agregada del sistema) con conteo de trabajos por estado, tiempo promedio de procesamiento y cantidad de trabajos reintentados.
+- Descarga de bundles por streaming: la API transmite el archivo directamente desde MinIO hacia el cliente sin cargarlo completo en memoria.
+- Frontend web para registro, login, carga, seguimiento, descarga, reintento y cancelacion de trabajos.
 
-La autenticacion usa tokens con vigencia de 24 horas. Un bundle que no cumpla la estructura o tenga enlaces rotos queda en estado `failed` y no se registra como publicado.
+La autenticacion usa tokens con vigencia de 24 horas. Un bundle que no cumpla la estructura o tenga enlaces rotos queda en estado `failed` y no se registra como publicado. Un trabajo puede terminar en cinco estados: `queued`, `processing`, `completed`, `failed` o `cancelled`.
 
 ## Arquitectura planificada
 
@@ -75,16 +79,17 @@ La API debe responder rapidamente despues de registrar y encolar el trabajo. La 
 │   ├── Dockerfile
 │   ├── go.mod
 │   ├── go.sum
-│   └── main.go
+│   ├── main.go
+│   └── main_test.go
 ├── db/
 │   └── init/
-│       ├── 001_schema.sql
-│       ├── 002_auth.sql
-│       └── 003_job_retries.sql
+│       └── 001_schema.sql
 ├── docker-compose.yml
 ├── prueba.md
 └── README.md
 ```
+
+El esquema completo (usuarios, autenticacion, columnas de reintento y cancelacion) vive en un unico archivo `db/init/001_schema.sql`. Las migraciones que existieron en algun momento (`002_auth.sql`, `003_job_retries.sql`) se eliminaron por ser redundantes con el esquema base.
 
 ## Requisitos
 
@@ -310,6 +315,60 @@ curl -o bundle.zip http://localhost:8080/jobs/<job_id>/download -H "Authorizatio
 
 El archivo descargado contiene `index.md`, `log.md` y `documento.md`.
 
+La descarga usa streaming: la API lee el objeto desde MinIO y lo copia directamente a la respuesta HTTP (`io.Copy`), sin materializar el bundle completo en memoria. Se verifico con `docker stats` durante la descarga de un bundle de ~3.68 MB: el contenedor `api` se mantuvo en 13.54 MiB de memoria (0.17% del limite) mientras se transferian los datos por red, lo que confirma que la memoria no crece proporcionalmente al tamano del archivo.
+
+### Reintentar un trabajo fallido
+
+Solo se puede reintentar un trabajo propio que este en estado `failed`:
+
+```bash
+curl -X POST http://localhost:8080/jobs/<job_id>/retry -H "Authorization: Bearer <token>"
+```
+
+Respuesta esperada:
+
+```json
+{"job_id":"<uuid-nuevo>","status":"queued","retried_from_job_id":"<uuid-original>"}
+```
+
+Se crea un trabajo nuevo vinculado al mismo documento, con `attempts` en cero, y se encola de inmediato. El trabajo original no se modifica. Reintentar un trabajo que no esta en `failed` responde `404`.
+
+### Cancelar un trabajo en curso
+
+Solo se puede cancelar un trabajo propio que este en `queued` o `processing`:
+
+```bash
+curl -X POST http://localhost:8080/jobs/<job_id>/cancel -H "Authorization: Bearer <token>"
+```
+
+Respuesta esperada:
+
+```json
+{"job_id":"<uuid>","status":"cancelled"}
+```
+
+Si el trabajo ya estaba `completed`, `failed` o `cancelled`, la respuesta es `404`. Si la cancelacion llega mientras el worker ya esta procesando el trabajo, el worker termina su trabajo interno pero no lo marca `completed` al finalizar: el estado se mantiene en `cancelled`. Esto se probo forzando una demora artificial temporal en el worker durante el desarrollo, ya en la version final el worker no tiene ninguna demora agregada.
+
+**Limitacion conocida:** si la cancelacion ocurre muy tarde en el procesamiento, el bundle puede haberse subido a MinIO antes de que el worker revise el estado final. Ese bundle queda huerfano en el almacenamiento, pero permanece inaccesible porque la descarga exige `status = completed`. No se implemento borrado automatico del bundle huerfano; se considero una simplificacion razonable para el alcance del proyecto.
+
+### Consultar metricas del sistema
+
+No requiere autenticacion, ya que expone solo informacion agregada, no datos de un usuario en particular:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Respuesta esperada:
+
+```json
+{
+  "jobs_by_status": {"completed": 4, "failed": 3, "queued": 0, "processing": 0, "cancelled": 1},
+  "avg_processing_seconds": 0.12,
+  "jobs_retried": 2
+}
+```
+
 ### Consultar las tablas
 
 ```bash
@@ -429,5 +488,10 @@ documento.md
 
 ## Pendiente
 
-1. Mejorar la interfaz y agregar soporte para mas formatos de entrada.
-2. Agregar observabilidad y metricas del procesamiento.
+1. Rediseno visual del frontend (funcionalidad ya completa, falta el estilo definitivo).
+2. Soporte para mas formatos de entrada (PDF, DOCX, EPUB) mas alla de Markdown/HTML/texto plano.
+3. Extraccion de imagenes u otros recursos a una carpeta `assets/` dentro del bundle.
+4. Calculo de conformidad OKF de forma separada de la validez de plataforma.
+5. Grabacion del video de sustentacion.
+
+Los puntos 2, 3 y 4 pertenecen al alcance opcional de la seccion 5.2 del enunciado y no son obligatorios; se abordaran solo si queda tiempo disponible antes de la entrega.
