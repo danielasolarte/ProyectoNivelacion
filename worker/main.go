@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
@@ -87,6 +88,7 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 		return err
 	}
 	log.Printf("procesando trabajo %s, intento %d/%d\n", jobID, attempts, maxAttempts)
+	time.Sleep(8 * time.Second) // TEMPORAL: solo para probar la cancelación en processing, quitar después
 
 	var storageKey string
 	var originalName string
