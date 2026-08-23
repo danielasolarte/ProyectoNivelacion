@@ -1,284 +1,217 @@
-# Plataforma de conversion documental a bundles OKF
+# MAGICA - Plataforma de conversion documental a bundles OKF
 
-Proyecto de nivelacion de Daniela Solarte y Samara Martinez para la asignatura ISIS4426 Desarrollo de Soluciones Cloud.
+Proyecto de nivelacion de Daniela Solarte y Samara Martinez para ISIS4426 Desarrollo de Soluciones Cloud.
 
-La meta del proyecto es construir una plataforma web multiusuario que reciba documentos, los procese de forma asincrona mediante workers y genere bundles de conocimiento compatibles con Open Knowledge Format (OKF).
+MAGICA es una plataforma web multiusuario que recibe documentos Markdown, los procesa de forma asincrona mediante workers y genera bundles de conocimiento compatibles con la definicion operativa de Open Knowledge Format usada en el enunciado.
 
 ## Estado actual
 
-En esta etapa ya estan implementados:
+Implementado:
 
 - API HTTP en Go.
-- PostgreSQL 16 ejecutandose mediante Docker Compose.
-- Volumen persistente para los datos de PostgreSQL.
-- Esquema inicial para usuarios, documentos, trabajos y bundles.
-- Conexion de la API con PostgreSQL mediante `pgx`.
+- Worker independiente en Go.
+- Frontend web MAGICA en HTML, CSS y JavaScript.
+- PostgreSQL 16 para usuarios, documentos, trabajos y bundles.
+- Redis como cola de trabajos.
+- MinIO como almacenamiento de objetos para originales y bundles.
+- Docker Compose para levantar todo el sistema.
+- Registro y login de usuarios.
+- Tokens firmados con vigencia de 24 horas.
+- Aislamiento por propietario en consulta, descarga, reintento y cancelacion.
 - Endpoint `GET /health`.
 - Endpoint `POST /upload`.
-- Endpoint `GET /jobs/{job_id}` para consultar el estado.
-- Endpoint `GET /jobs/{job_id}/download` para descargar el bundle.
-- Registro de los metadatos del documento en PostgreSQL.
-- Almacenamiento del archivo original en MinIO.
-- Registro de la ruta del objeto en `documents.storage_key`.
-- Creacion de un trabajo con estado `queued`.
-- Generacion de identificadores UUID desde PostgreSQL.
-- Redis como cola de trabajos.
-- Worker independiente en Go.
-- Procesamiento asincrono del trabajo.
-- Segmentacion de documentos Markdown por encabezados.
-- Generacion de un bundle ZIP con `index.md`, `log.md` y `documento.md`.
-- Validacion de la estructura minima y de los enlaces de `index.md` antes de publicar.
-- Registro del bundle en MinIO y actualizacion del trabajo a `completed`.
-- Registro y login de usuarios.
-- Tokens firmados para autorizar operaciones por propietario.
-- Reintentos automaticos de trabajos fallidos hasta `max_attempts = 3` (tolerancia a fallos interna del worker).
+- Endpoint `GET /jobs/{job_id}`.
+- Endpoint `GET /jobs/{job_id}/download`.
+- Endpoint `POST /jobs/{job_id}/retry`.
+- Endpoint `POST /jobs/{job_id}/cancel`.
+- Endpoint `GET /bundles`.
+- Endpoint `GET /bundles/{bundle_id}`.
+- Endpoint `GET /bundles/{bundle_id}/download`.
+- Endpoint `GET /metrics`.
+- Endpoint protegido `GET /admin/metrics`.
+- Carga de documentos Markdown o texto plano.
+- Respuesta inmediata con `job_id` y estado `queued`.
+- Procesamiento asincrono fuera de la peticion HTTP.
+- Segmentacion Markdown por encabezados.
+- Bundle ZIP con `index.md`, `log.md` y uno o mas conceptos.
+- Identificador unico por bundle publicado (`bundle_id`).
+- Validacion minima de estructura y enlaces del indice antes de publicar.
+- Clasificacion de validacion como `valid`, `valid_with_warnings` o `invalid`.
+- Reintentos automaticos hasta `max_attempts = 3`.
+- Reintento manual de trabajos fallidos, vinculado con `retried_from_job_id`.
+- Cancelacion de trabajos en `queued` o `processing`.
 - Idempotencia frente a reentregas del mismo `job_id`.
-- Endpoint `POST /jobs/{job_id}/retry` para reintentar manualmente un trabajo en `failed`, vinculado al trabajo original mediante la columna `retried_from_job_id`.
-- Endpoint `POST /jobs/{job_id}/cancel` para cancelar un trabajo mientras esta en `queued` o `processing`. El worker respeta la cancelacion incluso si ya estaba procesando el trabajo: no publica el resultado si el estado cambio a `cancelled` mientras tanto.
-- Endpoint `GET /metrics` (sin autenticacion, informacion agregada del sistema) con conteo de trabajos por estado, tiempo promedio de procesamiento y cantidad de trabajos reintentados.
-- Descarga de bundles por streaming: la API transmite el archivo directamente desde MinIO hacia el cliente sin cargarlo completo en memoria.
-- Frontend web para registro, login, carga, seguimiento, descarga, reintento y cancelacion de trabajos.
+- Descarga por streaming desde MinIO hacia el cliente.
+- Metricas agregadas: trabajos por estado, bundles por validacion, tiempo promedio y trabajos reintentados.
+- Usuario administrador con panel de metricas visuales.
 
-La autenticacion usa tokens con vigencia de 24 horas. Un bundle que no cumpla la estructura o tenga enlaces rotos queda en estado `failed` y no se registra como publicado. Un trabajo puede terminar en cinco estados: `queued`, `processing`, `completed`, `failed` o `cancelled`.
+No implementado por decision de alcance:
 
-## Arquitectura planificada
+- Soporte para PDF, DOCX, EPUB u otros formatos ricos.
+- Extraccion de imagenes a `assets/`.
 
-- **Backend:** API y workers independientes implementados en Go.
-- **Cola de mensajes:** Redis.
-- **Base de datos:** PostgreSQL para metadatos de usuarios, documentos, trabajos y bundles.
-- **Almacenamiento de objetos:** MinIO para documentos originales y bundles.
-- **Worker:** servicio independiente en Go que consume trabajos desde Redis.
-- **Despliegue:** Docker Compose.
-
-El flujo final esperado es:
+## Arquitectura
 
 ```text
-Frontend -> API Go -> Redis -> Worker Go
-			  |                 |
-			  v                 v
-		  PostgreSQL          MinIO
+Frontend MAGICA -> API Go -> Redis -> Worker Go
+                     |                 |
+                     v                 v
+                 PostgreSQL          MinIO
 ```
 
-La API debe responder rapidamente despues de registrar y encolar el trabajo. La conversion no debe ejecutarse dentro de la peticion HTTP.
+Reglas importantes:
 
-## Estructura actual
+- La API no guarda archivos ni trabajos en memoria o disco local del contenedor.
+- La API registra metadatos, guarda el original en MinIO, encola el trabajo en Redis y retorna `202 Accepted`.
+- El worker consume la cola, descarga el original desde MinIO, genera el ZIP, valida el bundle y publica el resultado.
+- Los datos sobreviven reinicios gracias a los volumenes de PostgreSQL y MinIO.
+- Cada bundle publicado tiene un `bundle_id` propio para consulta y descarga posterior.
+
+## Estructura del bundle
+
+Documento breve sin divisiones:
 
 ```text
-.
-├── api/
-│   ├── Dockerfile
-│   ├── go.mod
-│   ├── go.sum
-│   └── main.go
-├── frontend/
-│   ├── Dockerfile
-│   ├── index.html
-│   ├── styles.css
-│   └── app.js
-├── worker/
-│   ├── Dockerfile
-│   ├── go.mod
-│   ├── go.sum
-│   ├── main.go
-│   └── main_test.go
-├── db/
-│   └── init/
-│       └── 001_schema.sql
-├── docker-compose.yml
-├── prueba.md
-└── README.md
+bundle/
+|-- index.md
+|-- log.md
+`-- documento.md
 ```
 
-El esquema completo (usuarios, autenticacion, columnas de reintento y cancelacion) vive en un unico archivo `db/init/001_schema.sql`. Las migraciones que existieron en algun momento (`002_auth.sql`, `003_job_retries.sql`) se eliminaron por ser redundantes con el esquema base.
+Documento con varias secciones:
+
+```text
+bundle/
+|-- index.md
+|-- log.md
+|-- capitulo-01.md
+|-- capitulo-02.md
+`-- capitulo-03.md
+```
+
+`index.md` enumera y enlaza los conceptos en orden. `log.md` registra documento original, unidades detectadas, transformacion aplicada, validacion y advertencias.
+
+## Clasificacion de validacion
+
+- `valid`: estructura minima correcta, enlaces resueltos y documento con estructura Markdown detectable.
+- `valid_with_warnings`: bundle descargable, pero con advertencias. Ejemplo: documento sin encabezados Markdown; se genera un unico concepto y se deja advertencia en `log.md`.
+- `invalid`: falta `index.md`, falta `log.md`, no hay conceptos Markdown o el indice enlaza archivos inexistentes. En este caso el trabajo queda `failed` y no se habilita la descarga.
+
+## Frontend
+
+La interfaz usa la marca **MAGICA** con una direccion editorial, sobria y funcional:
+
+- Wordmark MAGICA en serif editorial.
+- Paleta cream, dark brown, burgundy y neutrales calidos.
+- Formularios centrados y legibles.
+- Flujo completo desde el navegador: registro, login, carga, seguimiento, cancelacion, reintento, descarga y nuevo documento.
+- Listado de bundles del usuario autenticado.
+- Busqueda y consulta de bundles por `bundle_id`.
+- Panel de administrador con metricas visuales para usuarios admin.
+- Sin glows, gradientes, sparkles decorativos ni look de dashboard generico.
 
 ## Requisitos
 
-- Docker Desktop con Docker Compose.
+- Docker Desktop.
+- Docker Compose.
 
-No es necesario instalar Go localmente para ejecutar la aplicacion, porque la API se compila dentro del Dockerfile.
+No es necesario instalar Go localmente para ejecutar la aplicacion.
 
-## Guia paso a paso
+## Levantar el sistema
 
-### 1. Iniciar Docker Desktop
-
-Abre Docker Desktop y espera a que el motor indique que esta activo. La aplicacion necesita Docker Compose para construir y ejecutar todos los servicios.
-
-### 2. Abrir la carpeta del proyecto
-
-En PowerShell, ubicate en la raiz del repositorio:
-
-```powershell
-Set-Location "C:\ruta\al\ProyectoNivelacion"
-```
-
-La carpeta correcta contiene `docker-compose.yml`, `api`, `worker`, `frontend` y `db`.
-
-### 3. Construir y levantar la aplicacion
-
-Ejecuta el siguiente comando la primera vez y cada vez que cambie el codigo:
+Desde la raiz del repositorio:
 
 ```powershell
 docker compose up --build -d
 ```
 
-Este comando construye y levanta:
-
-- Frontend en Nginx.
-- API en Go.
-- Worker en Go.
-- PostgreSQL.
-- Redis.
-- MinIO.
-
-### 4. Verificar los servicios
+Servicios esperados:
 
 ```powershell
 docker compose ps
 ```
 
-Debes ver estos servicios activos:
+Debes ver:
 
 ```text
 api
 frontend
-minio
+worker
 postgres
 redis
-worker
+minio
 ```
 
-PostgreSQL y Redis deben mostrar el estado `healthy`.
-
-Si un servicio no inicia, revisa sus logs:
-
-```powershell
-docker compose logs api
-docker compose logs worker
-docker compose logs postgres
-```
-
-### 5. Abrir el frontend
-
-Abre esta direccion en el navegador:
+Abrir la app:
 
 ```text
 http://localhost:3000
 ```
 
-El frontend muestra el formulario de registro y login.
-
-### 6. Crear una cuenta
-
-Desde el frontend:
-
-1. Escribe un email.
-2. Escribe una contraseña de al menos 8 caracteres.
-3. Presiona `Make an account`.
-
-Al terminar, la aplicacion guarda el token de sesión en el navegador y muestra el espacio de carga.
-
-### 7. Cargar un documento
-
-1. Presiona `Choose a tiny Markdown file`.
-2. Selecciona `prueba.md` o cualquier archivo `.md`.
-3. Presiona `Make my bundle`.
-
-La API responde inmediatamente con un trabajo en estado `queued`. Luego el worker:
-
-1. Lee el archivo desde MinIO.
-2. Segmenta el Markdown por encabezados.
-3. Genera el bundle.
-4. Valida `index.md`, `log.md` y sus enlaces.
-5. Guarda el ZIP en MinIO.
-6. Cambia el trabajo a `completed`.
-
-El frontend consulta el estado automáticamente. Cuando termina, aparece `Take my cute bundle.zip`.
-
-### 8. Descargar el bundle
-
-Presiona `Take my cute bundle.zip`. El navegador descargara un archivo llamado `bundle.zip`.
-
-El ZIP debe contener:
+API:
 
 ```text
-index.md
-log.md
-capitulo-01.md
-capitulo-02.md
-...
+http://localhost:8080
 ```
 
-Un documento sin encabezados genera un unico `documento.md`.
-
-### 9. Detener la aplicacion
-
-Para detener los contenedores sin eliminar los datos:
-
-```powershell
-docker compose down
-```
-
-Para volver a iniciar sin reconstruir:
-
-```powershell
-docker compose up -d
-```
-
-### 10. Reiniciar desde cero
-
-Este comando elimina tambien los volumenes de PostgreSQL y MinIO. Los documentos y usuarios guardados se perderan:
-
-```powershell
-docker compose down -v
-docker compose up --build -d
-```
-
-## Direcciones de los servicios
+MinIO:
 
 ```text
-Frontend:      http://localhost:3000
-API:           http://localhost:8080
-API health:    http://localhost:8080/health
-MinIO API:     http://localhost:9000
-MinIO consola: http://localhost:9001
-PostgreSQL:    localhost:5432
-Redis:         localhost:6379
+http://localhost:9001
+Usuario: minio
+Password: minio_dev_password
 ```
 
-## Pruebas actuales
+Usuario administrador creado por defecto:
 
-### Healthcheck de la API
+```text
+Email: admin@magica.local
+Password: admin12345
+```
+
+## Flujo desde el frontend
+
+1. Crear cuenta o iniciar sesion.
+2. Seleccionar un archivo `.md`.
+3. Presionar `Create bundle`.
+4. Ver el estado del trabajo.
+5. Descargar con `Download bundle`.
+6. Usar `New document` para iniciar otra conversion.
+7. Revisar el historial en `Your bundles`.
+8. Consultar un bundle especifico por `bundle_id`.
+
+Si se inicia sesion como administrador, el frontend muestra el panel `Admin metrics` con graficas de trabajos por estado y bundles por validacion.
+
+## Pruebas por API
+
+Healthcheck:
 
 ```bash
 curl http://localhost:8080/health
 ```
 
-Respuesta esperada:
-
-```json
-{"status":"ok","service":"api"}
-```
-
-### Registrar un usuario
+Registro:
 
 ```bash
-curl -X POST http://localhost:8080/auth/register -H "Content-Type: application/json" -d "{\"email\":\"ana@example.com\",\"password\":\"password123\"}"
+curl -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"ana@example.com\",\"password\":\"password123\"}"
 ```
 
-La respuesta incluye un `token`. Debe enviarse como `Bearer` en las operaciones protegidas.
-
-### Iniciar sesión
+Login:
 
 ```bash
-curl -X POST http://localhost:8080/auth/login -H "Content-Type: application/json" -d "{\"email\":\"ana@example.com\",\"password\":\"password123\"}"
+curl -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"ana@example.com\",\"password\":\"password123\"}"
 ```
 
-### Cargar un documento
-
-El campo multipart debe llamarse `document`:
+Carga:
 
 ```bash
-curl -X POST http://localhost:8080/upload -H "Authorization: Bearer <token>" -F "document=@prueba.md"
+curl -X POST http://localhost:8080/upload \
+  -H "Authorization: Bearer <token>" \
+  -F "document=@prueba.md"
 ```
 
 Respuesta esperada:
@@ -287,211 +220,155 @@ Respuesta esperada:
 {"job_id":"<uuid>","status":"queued"}
 ```
 
-La API registra el usuario autenticado, el documento y el trabajo en una transaccion de PostgreSQL, guarda el archivo original en MinIO y publica el `job_id` en Redis. El worker consume el trabajo y genera el bundle de forma independiente.
-
-El estado final esperado para una carga exitosa es `completed` y el bundle queda registrado en la tabla `bundles`.
-
-Cada trabajo registra `attempts` y `max_attempts`. Si ocurre un fallo antes de publicar el bundle, el worker lo devuelve a `queued` hasta tres veces. Una reentrega de un trabajo ya procesado no crea un segundo bundle.
-
-### Consultar el estado de un trabajo
+Estado:
 
 ```bash
-curl http://localhost:8080/jobs/<job_id> -H "Authorization: Bearer <token>"
-```
-
-Respuesta esperada:
-
-```json
-{"job_id":"<uuid>","original_name":"prueba.md","status":"completed","error":null}
-```
-
-### Descargar el bundle
-
-Solo los trabajos completados permiten descargar el resultado:
-
-```bash
-curl -o bundle.zip http://localhost:8080/jobs/<job_id>/download -H "Authorization: Bearer <token>"
-```
-
-El archivo descargado contiene `index.md`, `log.md` y `documento.md`.
-
-La descarga usa streaming: la API lee el objeto desde MinIO y lo copia directamente a la respuesta HTTP (`io.Copy`), sin materializar el bundle completo en memoria. Se verifico con `docker stats` durante la descarga de un bundle de ~3.68 MB: el contenedor `api` se mantuvo en 13.54 MiB de memoria (0.17% del limite) mientras se transferian los datos por red, lo que confirma que la memoria no crece proporcionalmente al tamano del archivo.
-
-### Reintentar un trabajo fallido
-
-Solo se puede reintentar un trabajo propio que este en estado `failed`:
-
-```bash
-curl -X POST http://localhost:8080/jobs/<job_id>/retry -H "Authorization: Bearer <token>"
-```
-
-Respuesta esperada:
-
-```json
-{"job_id":"<uuid-nuevo>","status":"queued","retried_from_job_id":"<uuid-original>"}
-```
-
-Se crea un trabajo nuevo vinculado al mismo documento, con `attempts` en cero, y se encola de inmediato. El trabajo original no se modifica. Reintentar un trabajo que no esta en `failed` responde `404`.
-
-### Cancelar un trabajo en curso
-
-Solo se puede cancelar un trabajo propio que este en `queued` o `processing`:
-
-```bash
-curl -X POST http://localhost:8080/jobs/<job_id>/cancel -H "Authorization: Bearer <token>"
-```
-
-Respuesta esperada:
-
-```json
-{"job_id":"<uuid>","status":"cancelled"}
-```
-
-Si el trabajo ya estaba `completed`, `failed` o `cancelled`, la respuesta es `404`. Si la cancelacion llega mientras el worker ya esta procesando el trabajo, el worker termina su trabajo interno pero no lo marca `completed` al finalizar: el estado se mantiene en `cancelled`. Esto se probo forzando una demora artificial temporal en el worker durante el desarrollo, ya en la version final el worker no tiene ninguna demora agregada.
-
-**Limitacion conocida:** si la cancelacion ocurre muy tarde en el procesamiento, el bundle puede haberse subido a MinIO antes de que el worker revise el estado final. Ese bundle queda huerfano en el almacenamiento, pero permanece inaccesible porque la descarga exige `status = completed`. No se implemento borrado automatico del bundle huerfano; se considero una simplificacion razonable para el alcance del proyecto.
-
-### Consultar metricas del sistema
-
-No requiere autenticacion, ya que expone solo informacion agregada, no datos de un usuario en particular:
-
-```bash
-curl http://localhost:8080/metrics
+curl http://localhost:8080/jobs/<job_id> \
+  -H "Authorization: Bearer <token>"
 ```
 
 Respuesta esperada:
 
 ```json
 {
-  "jobs_by_status": {"completed": 4, "failed": 3, "queued": 0, "processing": 0, "cancelled": 1},
-  "avg_processing_seconds": 0.12,
-  "jobs_retried": 2
+  "job_id": "<uuid>",
+  "original_name": "prueba.md",
+  "status": "completed",
+  "error": null,
+  "validation_status": "valid",
+  "bundle_id": "<uuid>"
 }
 ```
 
-### Consultar las tablas
+Descarga:
 
 ```bash
-docker compose exec postgres psql -U okf -d okf -c "\\dt"
+curl -o bundle.zip http://localhost:8080/jobs/<job_id>/download \
+  -H "Authorization: Bearer <token>"
 ```
 
-Consultar los trabajos creados:
+Listar bundles del usuario autenticado:
 
 ```bash
-docker compose exec postgres psql -U okf -d okf -c "SELECT d.original_name, j.id, j.status FROM documents d JOIN jobs j ON j.document_id = d.id ORDER BY j.created_at DESC;"
+curl http://localhost:8080/bundles \
+  -H "Authorization: Bearer <token>"
 ```
 
-Consultar los bundles generados:
+Consultar un bundle por ID:
 
 ```bash
-docker compose exec postgres psql -U okf -d okf -c "SELECT job_id, storage_key, validation_status FROM bundles ORDER BY created_at DESC;"
+curl http://localhost:8080/bundles/<bundle_id> \
+  -H "Authorization: Bearer <token>"
 ```
 
-## Solucion de problemas
+Descargar un bundle por ID:
 
-### La pagina no carga
+```bash
+curl -o bundle.zip http://localhost:8080/bundles/<bundle_id>/download \
+  -H "Authorization: Bearer <token>"
+```
 
-Comprueba que el frontend este activo:
+Metricas:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+Metricas de administrador:
+
+```bash
+curl http://localhost:8080/admin/metrics \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+Ejemplo:
+
+```json
+{
+  "jobs_by_status": {"completed": 4, "queued": 0, "processing": 0, "failed": 0, "cancelled": 0},
+  "bundles_by_validation": {"valid": 3, "valid_with_warnings": 1},
+  "avg_processing_seconds": 0.12,
+  "jobs_retried": 1
+}
+```
+
+## Condiciones verificables del enunciado
+
+- Asincronia efectiva: `POST /upload` responde `202 Accepted` con `job_id`; el worker continua en segundo plano.
+- Documento breve: un archivo sin divisiones produce `index.md`, `log.md` y `documento.md`.
+- Documento estructurado: headings Markdown producen `capitulo-01.md`, `capitulo-02.md`, etc.
+- Bundle incompleto: `validateBundle` rechaza ZIPs sin `index.md`, sin `log.md`, sin conceptos o con enlaces rotos.
+- Aislamiento: las consultas filtran por `d.user_id = usuario autenticado`; un usuario no puede consultar ni descargar jobs ajenos.
+- Consulta por bundle: cada bundle publicado tiene `bundle_id` y puede consultarse o descargarse sin depender visualmente del `job_id`.
+- Administracion: solo usuarios admin pueden consumir `GET /admin/metrics`; usuarios normales reciben `403 Forbidden`.
+- Ausencia de duplicados: el worker reclama jobs solo en `queued` y la tabla `bundles` tiene `UNIQUE(job_id)` con `ON CONFLICT DO NOTHING`.
+
+## Tests
+
+Como Go no es requisito local, los tests pueden ejecutarse con Docker:
 
 ```powershell
-docker compose ps frontend
-docker compose logs frontend
+docker run --rm -v "${PWD}:/app" -w /app/worker golang:1.24-alpine go test ./...
 ```
 
-Si no esta activo, ejecuta:
+Cubren:
+
+- Bundle valido.
+- Falta de `index.md`.
+- Falta de `log.md`.
+- Bundle sin conceptos.
+- Enlaces rotos en `index.md`.
+- Segmentacion de documento estructurado.
+- Documento sin encabezados como `valid_with_warnings`.
+- Documento con encabezados como `valid`.
+
+## Comandos utiles
+
+Logs:
 
 ```powershell
-docker compose up --build -d frontend
+docker compose logs api --tail 50
+docker compose logs worker --tail 50
 ```
 
-### Aparece `autenticacion requerida` al descargar
-
-No abras directamente la URL `http://localhost:8080/jobs/<job_id>/download` desde el navegador. Esa ruta exige el token `Bearer`.
-
-Usa el boton `Take my cute bundle.zip` dentro del frontend. Si el navegador conserva una version anterior, haz una recarga completa con `Ctrl + F5`, cierra sesion e inicia sesion nuevamente.
-
-### La carga no termina
-
-Revisa el estado de API, Redis y worker:
+Consultar trabajos:
 
 ```powershell
-docker compose ps
-docker compose logs api --tail 30
-docker compose logs worker --tail 30
-docker compose logs redis --tail 30
+docker compose exec postgres psql -U okf -d okf -c "SELECT d.original_name, j.id, j.status, b.validation_status FROM documents d JOIN jobs j ON j.document_id = d.id LEFT JOIN bundles b ON b.job_id = j.id ORDER BY j.created_at DESC;"
 ```
 
-El trabajo puede pasar por `queued` y `processing` antes de llegar a `completed`.
-
-### Error de conexión con PostgreSQL
-
-Espera a que el servicio aparezca como `healthy` y vuelve a levantar la API:
+Detener:
 
 ```powershell
-docker compose up -d postgres
-docker compose up -d api worker
+docker compose down
 ```
 
-## Base de datos
+Reiniciar desde cero, borrando datos:
 
-La configuracion local de PostgreSQL es:
-
-```text
-Base de datos: okf
-Usuario: okf
-Contrasena: okf_dev_password
-Puerto: 5432
+```powershell
+docker compose down -v
+docker compose up --build -d
 ```
 
-El esquema inicial crea estas tablas:
+## Sustentacion
 
-- `users`: usuarios de la plataforma.
-- `documents`: metadatos de los documentos y su propietario.
-- `jobs`: trabajos de conversion y sus estados.
-- `bundles`: resultado y estado de validacion del bundle.
+El video es obligatorio segun el enunciado. Se recomienda mostrar:
 
-Los datos se conservan en el volumen Docker `postgres_data`. Los scripts de `db/init` se ejecutan automaticamente cuando se crea la base por primera vez.
-
-## Almacenamiento de objetos
-
-MinIO esta disponible en:
-
-```text
-API S3: http://localhost:9000
-Consola web: http://localhost:9001
-Usuario: minio
-Contrasena: minio_dev_password
-Bucket: documents
-```
-
-Los objetos se guardan con una ruta similar a:
-
-```text
-users/<user-id>/documents/<document-id>/prueba.md
-```
-
-El volumen Docker `minio_data` conserva los archivos aunque los contenedores se reinicien.
-
-Los bundles se guardan con una ruta similar a:
-
-```text
-bundles/<job-id>/bundle.zip
-```
-
-El ZIP minimo contiene:
-
-```text
-index.md
-log.md
-documento.md
-```
+1. `docker compose up --build -d`.
+2. Diagrama de servicios y explicacion de API sin estado.
+3. Carga desde frontend con respuesta inmediata.
+4. Seguimiento del estado y descarga del ZIP.
+5. Apertura de `index.md`, `log.md` y conceptos.
+6. Caso con varias secciones.
+7. Caso sin encabezados que queda `valid_with_warnings`.
+8. Intento de acceso a un job de otro usuario.
+9. Consulta de bundles por `bundle_id`.
+10. Reintento, cancelacion y metricas.
+11. Login con admin y visualizacion del panel `Admin metrics`.
+12. Validacion negativa con tests del worker.
 
 ## Pendiente
 
-1. Rediseno visual del frontend (funcionalidad ya completa, falta el estilo definitivo).
-2. Soporte para mas formatos de entrada (PDF, DOCX, EPUB) mas alla de Markdown/HTML/texto plano.
-3. Extraccion de imagenes u otros recursos a una carpeta `assets/` dentro del bundle.
-4. Calculo de conformidad OKF de forma separada de la validez de plataforma.
-5. Grabacion del video de sustentacion.
-
-Los puntos 2, 3 y 4 pertenecen al alcance opcional de la seccion 5.2 del enunciado y no son obligatorios; se abordaran solo si queda tiempo disponible antes de la entrega.
+- Soporte para PDF, DOCX, EPUB u otros formatos adicionales.
+- Extraccion de recursos a `assets/`.
+- Video de sustentacion.

@@ -46,6 +46,8 @@ services:
     environment:
       DATABASE_URL: postgres://okf:okf_dev_password@postgres:5432/okf
       DEFAULT_USER_EMAIL: demo@example.com
+      ADMIN_EMAIL: admin@magica.local
+      ADMIN_PASSWORD: admin12345
       OBJECT_STORAGE_ENDPOINT: minio:9000
       OBJECT_STORAGE_ACCESS_KEY: minio
       OBJECT_STORAGE_SECRET_KEY: minio_dev_password

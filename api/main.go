@@ -53,6 +53,18 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 // metricsHandler
 func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	writeMetrics(w, r)
+}
+
+func adminMetricsHandler(w http.ResponseWriter, r *http.Request) {
+	if _, err := requireAdmin(r); err != nil {
+		http.Error(w, "admin requerido", http.StatusForbidden)
+		return
+	}
+	writeMetrics(w, r)
+}
+
+func writeMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	rows, err := db.Query(ctx, `SELECT status, COUNT(*) FROM jobs GROUP BY status`)
@@ -62,10 +74,10 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	jobsByStatus := map[string]int{}
+	jobsByStatus := map[string]int64{}
 	for rows.Next() {
 		var status string
-		var count int
+		var count int64
 		if err := rows.Scan(&status, &count); err != nil {
 			http.Error(w, "no se pudieron leer las métricas", http.StatusInternalServerError)
 			return
@@ -75,14 +87,17 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	var avgSeconds *float64
 	err = db.QueryRow(ctx, `
-		SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)))
-		FROM jobs WHERE status = 'completed'`).Scan(&avgSeconds)
+		SELECT AVG(EXTRACT(EPOCH FROM (completed_at - processing_started_at)))
+		FROM jobs
+		WHERE status = 'completed'
+		  AND processing_started_at IS NOT NULL
+		  AND completed_at IS NOT NULL`).Scan(&avgSeconds)
 	if err != nil {
 		http.Error(w, "no se pudo calcular el tiempo promedio", http.StatusInternalServerError)
 		return
 	}
 
-	var jobsRetried int
+	var jobsRetried int64
 	err = db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM jobs WHERE retried_from_job_id IS NOT NULL`).Scan(&jobsRetried)
 	if err != nil {
@@ -90,9 +105,28 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	validationRows, err := db.Query(ctx, `SELECT validation_status, COUNT(*) FROM bundles GROUP BY validation_status`)
+	if err != nil {
+		http.Error(w, "no se pudieron calcular las metricas de validacion", http.StatusInternalServerError)
+		return
+	}
+	defer validationRows.Close()
+
+	bundlesByValidation := map[string]int64{}
+	for validationRows.Next() {
+		var status string
+		var count int64
+		if err := validationRows.Scan(&status, &count); err != nil {
+			http.Error(w, "no se pudieron leer las metricas de validacion", http.StatusInternalServerError)
+			return
+		}
+		bundlesByValidation[status] = count
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"jobs_by_status":         jobsByStatus,
+		"bundles_by_validation":  bundlesByValidation,
 		"avg_processing_seconds": avgSeconds,
 		"jobs_retried":           jobsRetried,
 	})
@@ -265,10 +299,11 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var userID string
+	var isAdmin bool
 	err = db.QueryRow(r.Context(), `
 		INSERT INTO users (email, password_hash)
 		VALUES ($1, $2)
-		RETURNING id`, strings.ToLower(strings.TrimSpace(input.Email)), string(hash)).Scan(&userID)
+		RETURNING id, is_admin`, strings.ToLower(strings.TrimSpace(input.Email)), string(hash)).Scan(&userID, &isAdmin)
 	if err != nil {
 		http.Error(w, "el email ya está registrado", http.StatusConflict)
 		return
@@ -280,7 +315,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"user_id": userID, "token": token})
+	json.NewEncoder(w).Encode(map[string]any{"user_id": userID, "token": token, "is_admin": isAdmin})
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
@@ -298,7 +333,8 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var userID string
 	var passwordHash *string
-	err := db.QueryRow(r.Context(), `SELECT id, password_hash FROM users WHERE email = $1`, strings.ToLower(strings.TrimSpace(input.Email))).Scan(&userID, &passwordHash)
+	var isAdmin bool
+	err := db.QueryRow(r.Context(), `SELECT id, password_hash, is_admin FROM users WHERE email = $1`, strings.ToLower(strings.TrimSpace(input.Email))).Scan(&userID, &passwordHash, &isAdmin)
 	if err != nil || passwordHash == nil || bcrypt.CompareHashAndPassword([]byte(*passwordHash), []byte(input.Password)) != nil {
 		http.Error(w, "credenciales inválidas", http.StatusUnauthorized)
 		return
@@ -309,7 +345,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"user_id": userID, "token": token})
+	json.NewEncoder(w).Encode(map[string]any{"user_id": userID, "token": token, "is_admin": isAdmin})
 }
 
 func jobStatusHandler(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -322,11 +358,14 @@ func jobStatusHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 	var originalName string
 	var status string
 	var errorMessage *string
+	var validationStatus *string
+	var bundleID *string
 	err = db.QueryRow(r.Context(), `
-		SELECT d.original_name, j.status, j.error_message
+		SELECT d.original_name, j.status, j.error_message, b.validation_status, b.id
 		FROM jobs j
 		JOIN documents d ON d.id = j.document_id
-		WHERE j.id = $1 AND d.user_id = $2`, jobID, userID).Scan(&originalName, &status, &errorMessage)
+		LEFT JOIN bundles b ON b.job_id = j.id
+		WHERE j.id = $1 AND d.user_id = $2`, jobID, userID).Scan(&originalName, &status, &errorMessage, &validationStatus, &bundleID)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -338,7 +377,32 @@ func jobStatusHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 		"original_name": originalName,
 		"status":        status,
 		"error":         errorMessage,
+		"validation_status": validationStatus,
+		"bundle_id": bundleID,
 	})
+}
+
+func bundlesHandler(w http.ResponseWriter, r *http.Request) {
+	bundlePath := strings.TrimPrefix(r.URL.Path, "/bundles")
+	bundlePath = strings.Trim(bundlePath, "/")
+
+	switch {
+	case bundlePath == "" && r.Method == http.MethodGet:
+		bundleListHandler(w, r)
+	case bundlePath != "" && r.Method == http.MethodGet:
+		parts := strings.Split(bundlePath, "/")
+		if len(parts) == 1 {
+			bundleDetailHandler(w, r, parts[0])
+			return
+		}
+		if len(parts) == 2 && parts[1] == "download" {
+			bundleDownloadHandler(w, r, parts[0])
+			return
+		}
+		http.NotFound(w, r)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func jobDownloadHandler(w http.ResponseWriter, r *http.Request, jobID string) {
@@ -378,6 +442,114 @@ func jobDownloadHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 	}
 }
 
+func bundleListHandler(w http.ResponseWriter, r *http.Request) {
+	userID, err := authenticatedUserID(r)
+	if err != nil {
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+
+	rows, err := db.Query(r.Context(), `
+		SELECT b.id, b.job_id, d.original_name, b.validation_status, b.created_at
+		FROM bundles b
+		JOIN jobs j ON j.id = b.job_id
+		JOIN documents d ON d.id = j.document_id
+		WHERE d.user_id = $1 AND j.status = 'completed'
+		ORDER BY b.created_at DESC`, userID)
+	if err != nil {
+		http.Error(w, "no se pudieron listar los bundles", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	bundles := []map[string]any{}
+	for rows.Next() {
+		var bundleID, jobID, originalName, validationStatus string
+		var createdAt time.Time
+		if err := rows.Scan(&bundleID, &jobID, &originalName, &validationStatus, &createdAt); err != nil {
+			http.Error(w, "no se pudieron leer los bundles", http.StatusInternalServerError)
+			return
+		}
+		bundles = append(bundles, map[string]any{
+			"bundle_id":         bundleID,
+			"job_id":            jobID,
+			"original_name":     originalName,
+			"validation_status": validationStatus,
+			"created_at":        createdAt,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"bundles": bundles})
+}
+
+func bundleDetailHandler(w http.ResponseWriter, r *http.Request, bundleID string) {
+	userID, err := authenticatedUserID(r)
+	if err != nil {
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+
+	var jobID, originalName, validationStatus string
+	var createdAt time.Time
+	err = db.QueryRow(r.Context(), `
+		SELECT b.job_id, d.original_name, b.validation_status, b.created_at
+		FROM bundles b
+		JOIN jobs j ON j.id = b.job_id
+		JOIN documents d ON d.id = j.document_id
+		WHERE b.id = $1 AND d.user_id = $2 AND j.status = 'completed'`, bundleID, userID).Scan(&jobID, &originalName, &validationStatus, &createdAt)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"bundle_id":         bundleID,
+		"job_id":            jobID,
+		"original_name":     originalName,
+		"validation_status": validationStatus,
+		"created_at":        createdAt,
+	})
+}
+
+func bundleDownloadHandler(w http.ResponseWriter, r *http.Request, bundleID string) {
+	userID, err := authenticatedUserID(r)
+	if err != nil {
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+
+	var storageKey string
+	err = db.QueryRow(r.Context(), `
+		SELECT b.storage_key
+		FROM bundles b
+		JOIN jobs j ON j.id = b.job_id
+		JOIN documents d ON d.id = j.document_id
+		WHERE b.id = $1 AND d.user_id = $2 AND j.status = 'completed'`, bundleID, userID).Scan(&storageKey)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	object, err := objectStore.GetObject(r.Context(), objectBucket, storageKey, minio.GetObjectOptions{})
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer object.Close()
+	if _, err := object.Stat(); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="bundle.zip"`)
+	if _, err := io.Copy(w, object); err != nil {
+		log.Printf("error enviando bundle %s: %v\n", bundleID, err)
+	}
+}
+
 // jobRetryHandler crea un job nuevo vinculado a un job que falló, para
 // reintentarlo. No modifica el job original: crea uno nuevo, vinculado
 // por retried_from_job_id, para dejar trazabilidad de que es un reintento.
@@ -400,7 +572,7 @@ func jobRetryHandler(w http.ResponseWriter, r *http.Request, jobID string) {
 		SELECT j.document_id
 		FROM jobs j
 		JOIN documents d ON d.id = j.document_id
-		WHERE j.id = $1 AND d.user_id = $2 AND j.status = 'failed'`, jobID, userID).Scan(&documentID)
+		WHERE j.id = $1 AND d.user_id = $2 AND j.status IN ('failed', 'cancelled')`, jobID, userID).Scan(&documentID)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -479,6 +651,41 @@ func authenticatedUserID(r *http.Request) (string, error) {
 	return parseToken(strings.TrimPrefix(header, "Bearer "))
 }
 
+func requireAdmin(r *http.Request) (string, error) {
+	userID, err := authenticatedUserID(r)
+	if err != nil {
+		return "", err
+	}
+	var isAdmin bool
+	err = db.QueryRow(r.Context(), `SELECT is_admin FROM users WHERE id = $1`, userID).Scan(&isAdmin)
+	if err != nil || !isAdmin {
+		return "", errors.New("admin requerido")
+	}
+	return userID, nil
+}
+
+func ensureAdminUser(ctx context.Context) error {
+	email := strings.ToLower(strings.TrimSpace(os.Getenv("ADMIN_EMAIL")))
+	password := os.Getenv("ADMIN_PASSWORD")
+	if email == "" || password == "" {
+		return nil
+	}
+	if len(password) < 8 {
+		return errors.New("ADMIN_PASSWORD debe tener al menos 8 caracteres")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `
+		INSERT INTO users (email, password_hash, is_admin)
+		VALUES ($1, $2, TRUE)
+		ON CONFLICT (email) DO UPDATE
+		SET is_admin = TRUE,
+			password_hash = EXCLUDED.password_hash`, email, string(hash))
+	return err
+}
+
 func createToken(userID string) (string, error) {
 	header, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
 	if err != nil {
@@ -534,6 +741,9 @@ func main() {
 	if err := db.Ping(context.Background()); err != nil {
 		log.Fatal("no se pudo conectar a PostgreSQL: ", err)
 	}
+	if err := ensureAdminUser(context.Background()); err != nil {
+		log.Fatal("no se pudo asegurar el usuario admin: ", err)
+	}
 	authSecret = []byte(os.Getenv("AUTH_SECRET"))
 	if len(authSecret) < 16 {
 		log.Fatal("AUTH_SECRET debe tener al menos 16 caracteres")
@@ -576,6 +786,9 @@ func main() {
 	http.Handle("/auth/login", withCORS(http.HandlerFunc(loginHandler)))
 	http.Handle("/upload", withCORS(http.HandlerFunc(uploadHandler)))
 	http.Handle("/jobs/", withCORS(http.HandlerFunc(jobsHandler)))
+	http.Handle("/bundles", withCORS(http.HandlerFunc(bundlesHandler)))
+	http.Handle("/bundles/", withCORS(http.HandlerFunc(bundlesHandler)))
+	http.Handle("/admin/metrics", withCORS(http.HandlerFunc(adminMetricsHandler)))
 	http.Handle("/metrics", withCORS(http.HandlerFunc(metricsHandler)))
 
 	log.Println("API escuchando en http://localhost:8080")

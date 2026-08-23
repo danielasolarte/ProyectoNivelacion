@@ -25,6 +25,12 @@ type worker struct {
 	queueName   string
 }
 
+type bundleBuild struct {
+	data             []byte
+	validationStatus string
+	warnings         []string
+}
+
 func main() {
 	ctx := context.Background()
 	databaseURL := os.Getenv("DATABASE_URL")
@@ -72,7 +78,11 @@ func main() {
 
 func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	result, err := jobWorker.db.Exec(ctx, `
-		UPDATE jobs SET status = 'processing', attempts = attempts + 1, updated_at = NOW()
+		UPDATE jobs
+		SET status = 'processing',
+			attempts = attempts + 1,
+			processing_started_at = COALESCE(processing_started_at, NOW()),
+			updated_at = NOW()
 		WHERE id = $1 AND status = 'queued'`, jobID)
 	if err != nil {
 		return err
@@ -112,25 +122,25 @@ func (jobWorker *worker) process(ctx context.Context, jobID string) error {
 	if err != nil {
 		return jobWorker.fail(ctx, jobID, err)
 	}
-	if err := validateBundle(bundle); err != nil {
+	if err := validateBundle(bundle.data); err != nil {
 		return jobWorker.fail(ctx, jobID, err)
 	}
 	bundleKey := path.Join("bundles", jobID, "bundle.zip")
-	_, err = jobWorker.objectStore.PutObject(ctx, jobWorker.bucket, bundleKey, bytes.NewReader(bundle), int64(len(bundle)), minio.PutObjectOptions{ContentType: "application/zip"})
+	_, err = jobWorker.objectStore.PutObject(ctx, jobWorker.bucket, bundleKey, bytes.NewReader(bundle.data), int64(len(bundle.data)), minio.PutObjectOptions{ContentType: "application/zip"})
 	if err != nil {
 		return jobWorker.fail(ctx, jobID, err)
 	}
 
 	_, err = jobWorker.db.Exec(ctx, `
 		INSERT INTO bundles (job_id, storage_key, validation_status)
-		VALUES ($1, $2, 'valid')
-		ON CONFLICT (job_id) DO NOTHING`, jobID, bundleKey)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (job_id) DO NOTHING`, jobID, bundleKey, bundle.validationStatus)
 	if err != nil {
 		return jobWorker.fail(ctx, jobID, err)
 	}
 	
 	result, err = jobWorker.db.Exec(ctx, `
-	UPDATE jobs SET status = 'completed', updated_at = NOW()
+	UPDATE jobs SET status = 'completed', completed_at = NOW(), updated_at = NOW()
 	WHERE id = $1 AND status = 'processing'`, jobID)
 
 	if err != nil {
@@ -148,6 +158,7 @@ func (jobWorker *worker) fail(ctx context.Context, jobID string, cause error) er
 		UPDATE jobs
 		SET status = CASE WHEN attempts < max_attempts THEN 'queued' ELSE 'failed' END,
 			error_message = $2,
+			completed_at = CASE WHEN attempts >= max_attempts THEN NOW() ELSE completed_at END,
 			updated_at = NOW()
 		WHERE id = $1
 		RETURNING status`, jobID, cause.Error()).Scan(&nextStatus)
@@ -165,10 +176,15 @@ func (jobWorker *worker) fail(ctx context.Context, jobID string, cause error) er
 	return cause
 }
 
-func buildBundle(originalName string, source []byte) ([]byte, error) {
+func buildBundle(originalName string, source []byte) (bundleBuild, error) {
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
 	concepts := splitMarkdown(source)
+	warnings := bundleWarnings(source, concepts)
+	validationStatus := "valid"
+	if len(warnings) > 0 {
+		validationStatus = "valid_with_warnings"
+	}
 	var index strings.Builder
 	index.WriteString("# Bundle\n\n")
 	for position, concept := range concepts {
@@ -178,20 +194,59 @@ func buildBundle(originalName string, source []byte) ([]byte, error) {
 		}
 		index.WriteString(fmt.Sprintf("- [Unidad %d](%s)\n", position+1, conceptName))
 		if err := writeZipFile(archive, conceptName, concept); err != nil {
-			return nil, err
+			return bundleBuild{}, err
 		}
 	}
 	if err := writeZipFile(archive, "index.md", []byte(index.String())); err != nil {
-		return nil, err
+		return bundleBuild{}, err
 	}
-	logContent := fmt.Sprintf("# Conversion log\n\n- Documento original: `%s`\n- Unidades detectadas: %d\n- Validacion: estructura minima correcta\n", originalName, len(concepts))
+	logContent := buildLog(originalName, len(concepts), validationStatus, warnings)
 	if err := writeZipFile(archive, "log.md", []byte(logContent)); err != nil {
-		return nil, err
+		return bundleBuild{}, err
 	}
 	if err := archive.Close(); err != nil {
-		return nil, err
+		return bundleBuild{}, err
 	}
-	return output.Bytes(), nil
+	return bundleBuild{data: output.Bytes(), validationStatus: validationStatus, warnings: warnings}, nil
+}
+
+func buildLog(originalName string, conceptCount int, validationStatus string, warnings []string) string {
+	var logContent strings.Builder
+	logContent.WriteString("# Conversion log\n\n")
+	logContent.WriteString(fmt.Sprintf("- Documento original: `%s`\n", originalName))
+	logContent.WriteString(fmt.Sprintf("- Unidades detectadas: %d\n", conceptCount))
+	logContent.WriteString("- Transformacion: segmentacion Markdown por encabezados\n")
+	logContent.WriteString("- Validacion: estructura minima y enlaces del indice verificados\n")
+	logContent.WriteString(fmt.Sprintf("- Resultado de validacion: %s\n", validationStatus))
+	if len(warnings) > 0 {
+		logContent.WriteString("\n## Advertencias\n\n")
+		for _, warning := range warnings {
+			logContent.WriteString(fmt.Sprintf("- %s\n", warning))
+		}
+	}
+	return logContent.String()
+}
+
+func bundleWarnings(source []byte, concepts [][]byte) []string {
+	text := strings.TrimSpace(string(source))
+	if text == "" {
+		return []string{"El documento original no contiene texto legible."}
+	}
+	if len(concepts) == 1 && !hasMarkdownHeading(source) {
+		return []string{"No se detectaron encabezados Markdown; se genero un unico concepto a partir del documento completo."}
+	}
+	return nil
+}
+
+func hasMarkdownHeading(source []byte) bool {
+	text := strings.ReplaceAll(string(source), "\r\n", "\n")
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") && (len(trimmed) == 1 || trimmed[1] == ' ' || trimmed[1] == '#') {
+			return true
+		}
+	}
+	return false
 }
 
 func splitMarkdown(source []byte) [][]byte {

@@ -3,62 +3,129 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OKF Studio</title>
-  <link rel="stylesheet" href="styles.css">
+  <title>MAGICA</title>
+  <link rel="stylesheet" href="styles.css?v=22">
 </head>
 <body>
-  <main class="shell">
+  <main>
     <header class="topbar">
-      <div class="brand"><span class="brand-mark">OK</span><span>OKF Studio <b>♡</b></span></div>
+      <div class="brand">
+        <span class="wordmark">MAGICA</span>
+        <span class="brand-subtitle">Document conversion studio</span>
+      </div>
       <span id="connection" class="status-dot">Offline</span>
     </header>
 
-    <section class="intro">
-      <p class="eyebrow">A TINY DOCUMENT CLOUD</p>
-      <h1>Your docs, but cuter.</h1>
-      <p class="lede">Give your little Markdown document a cozy home and watch it become a knowledge bundle. uwu</p>
-      <div class="mascot" aria-hidden="true"><span class="mascot-face">^w^</span><span class="mascot-note">ready! ✿</span></div>
-    </section>
+    <div class="auth-container">
+      <section class="auth-left">
+        <p class="auth-kicker">MAGICA</p>
+        <h1>Turn a document into a ready bundle.</h1>
+        <p class="auth-description">Upload a Markdown file, convert it, and download the finished bundle when it is ready.</p>
+      </section>
 
-    <section id="auth-panel" class="panel auth-panel">
-      <div class="panel-heading"><span class="step">01 ♡</span><h2>Come on in</h2></div>
-      <div class="auth-grid">
-        <form id="login-form">
-          <label>Email<input id="login-email" type="email" required placeholder="you@example.com"></label>
-          <label>Password<input id="login-password" type="password" required minlength="8" placeholder="8+ characters"></label>
-          <button type="submit">Sign in ♡ <span>-></span></button>
+      <section class="auth-right">
+        <form id="login-form" class="auth-form">
+          <h2>Welcome back</h2>
+          <label for="login-email">Email</label>
+          <input id="login-email" type="email" required placeholder="you@example.com">
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" required minlength="8" placeholder="8+ characters">
+          <button type="submit">Sign in</button>
+          <p class="auth-toggle">
+            New here? <a href="#" id="toggle-register" class="auth-link">Create an account</a>
+          </p>
         </form>
-        <form id="register-form" class="register-form">
-          <label>Create account<input id="register-email" type="email" required placeholder="new@example.com"></label>
-          <label>Password<input id="register-password" type="password" required minlength="8" placeholder="8+ characters"></label>
-          <button class="secondary" type="submit">Make an account ✿ <span>+</span></button>
+
+        <form id="register-form" class="auth-form hidden">
+          <h2>Create your account</h2>
+          <label for="register-email">Email</label>
+          <input id="register-email" type="email" required placeholder="your@email.com">
+          <label for="register-password">Password</label>
+          <input id="register-password" type="password" required minlength="8" placeholder="8+ characters">
+          <button type="submit">Create account</button>
+          <p class="auth-toggle">
+            Already have an account? <a href="#" id="toggle-login" class="auth-link">Sign in</a>
+          </p>
         </form>
-      </div>
-      <p id="auth-message" class="message"></p>
-    </section>
+
+        <p id="auth-message" class="message"></p>
+      </section>
+    </div>
 
     <section id="workspace" class="workspace hidden">
       <div class="workspace-header">
-        <div><p class="eyebrow">READY WHEN YOU ARE ✦</p><h2>New little document</h2></div>
-        <button id="logout" class="text-button">Bye for now ♡</button>
+        <div><h2>New document</h2></div>
+        <button id="logout" class="text-button">Sign out</button>
       </div>
+      <section id="admin-panel" class="admin-panel hidden">
+        <div class="history-heading">
+          <h3>Admin metrics</h3>
+          <button id="refresh-metrics" type="button" class="text-button">Refresh</button>
+        </div>
+        <p id="admin-message" class="history-message"></p>
+        <div id="metric-cards" class="metric-cards"></div>
+        <div class="metric-grid">
+          <section>
+            <h4>Job distribution</h4>
+            <div id="jobs-chart" class="bar-chart"></div>
+          </section>
+          <section>
+            <h4>Bundle validation</h4>
+            <div id="validation-chart" class="validation-viz"></div>
+          </section>
+        </div>
+        <p id="metric-summary" class="metric-summary"></p>
+      </section>
       <form id="upload-form" class="upload-zone">
-        <input id="document" type="file" accept=".md,.markdown,.txt" required>
-        <label for="document" class="file-picker"><span class="upload-icon">✿</span><strong id="file-name">Choose a tiny Markdown file</strong><small>Markdown or plain text, no worries</small></label>
-        <button type="submit">Make my bundle ✦ <span>-></span></button>
+        <input id="document" type="file" accept=".md,.markdown,.txt">
+        <label for="document" class="file-picker">
+          <span class="upload-icon" aria-hidden="true"></span>
+          <span class="file-copy">
+            <strong id="file-name">Choose a Markdown file</strong>
+            <small id="file-type">Markdown file</small>
+          </span>
+        </label>
+        <button type="submit">Create bundle <span>&rarr;</span></button>
       </form>
-      <div id="job-card" class="job-card hidden">
-        <div class="job-top"><span class="eyebrow">LATEST JOB</span><span id="job-status" class="pill">queued</span></div>
-        <h3 id="job-name">document.md</h3>
-        <p id="job-id" class="job-id"></p>
+      <div id="job-card" class="job-section hidden">
+        <h3 class="job-heading">Latest conversion</h3>
+        <div class="job-summary">
+          <p id="job-name">document.md</p>
+          <span id="job-status" class="job-status">Queued</span>
+        </div>
+        <p id="validation-summary" class="validation-summary hidden"></p>
+        <details class="job-details">
+          <summary>View details</summary>
+          <p id="job-id" class="job-id"></p>
+          <p id="latest-bundle-id" class="job-id"></p>
+          <p id="validation-status" class="job-id"></p>
+        </details>
         <div class="progress"><span id="progress-bar"></span></div>
         <p id="job-message" class="message"></p>
-        <a id="download" class="download hidden" href="#">Take my cute bundle.zip <span>↓</span></a>
-        <button id="retry" type="button" class="download hidden">Reintentar <span>↻</span></button>
-        <button id="cancel-job" type="button" class="download hidden">Cancelar <span>✕</span></button>
+        <div class="job-actions">
+          <a id="download" class="download hidden" href="#">Download bundle <span>&darr;</span></a>
+          <button id="cancel-job" type="button" class="download danger hidden">Cancel conversion <span>&times;</span></button>
+          <button id="retry" type="button" class="download alt hidden">Retry conversion <span>&#8635;</span></button>
+          <button id="new-document" type="button" class="download ghost hidden">New document</button>
+        </div>
       </div>
+      <section class="bundle-history">
+        <div class="history-heading">
+          <h3>Your bundles</h3>
+          <button id="refresh-bundles" type="button" class="text-button">Refresh</button>
+        </div>
+        <form id="bundle-lookup" class="bundle-lookup">
+          <label for="bundle-id-input">Find by bundle ID</label>
+          <div>
+            <input id="bundle-id-input" type="text" placeholder="Paste a bundle ID">
+            <button type="submit">Find</button>
+          </div>
+        </form>
+        <p id="bundle-message" class="history-message"></p>
+        <div id="bundle-list" class="bundle-list"></div>
+      </section>
     </section>
   </main>
-  <script src="app.js?v=2"></script>
+  <script src="app.js?v=22"></script>
 </body>
 </html>
