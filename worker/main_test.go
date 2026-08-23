@@ -116,8 +116,32 @@ func TestSplitMarkdown_DocumentoEstructurado(t *testing.T) {
 	}
 }
 
-func TestBuildBundle_DocumentoSinEncabezadosEsValidoConAdvertencias(t *testing.T) {
+func TestBuildBundle_DocumentoBreveSinEncabezadosEsValidoSinAdvertencias(t *testing.T) {
+	// Condicion verificable de la seccion 6 ("documento breve"): un
+	// documento corto sin divisiones debe producir un unico concepto SIN
+	// fallar y SIN advertencias, solo por el hecho de tener una unica
+	// unidad. Antes este caso marcaba valid_with_warnings; se corrigio
+	// porque contradecia la redaccion literal del enunciado.
 	bundle, err := buildBundle("nota.md", []byte("texto corto sin encabezados"))
+	if err != nil {
+		t.Fatalf("buildBundle no deberia fallar: %v", err)
+	}
+	if bundle.validationStatus != "valid" {
+		t.Fatalf("se esperaba valid (sin advertencias) para el documento breve, se obtuvo %s", bundle.validationStatus)
+	}
+	if len(bundle.warnings) != 0 {
+		t.Fatalf("no se esperaban advertencias para un documento breve sin encabezados, se obtuvieron %#v", bundle.warnings)
+	}
+	if err := validateBundle(bundle.data); err != nil {
+		t.Fatalf("el bundle debe seguir siendo descargable: %v", err)
+	}
+}
+
+func TestBuildBundle_DocumentoVacioEsValidoConAdvertencias(t *testing.T) {
+	// Este SI sigue siendo un caso legitimo de advertencia: el documento
+	// no tiene ningun contenido legible (distinto de "documento breve",
+	// que si tiene contenido, solo que sin encabezados).
+	bundle, err := buildBundle("vacio.md", []byte("   \n   "))
 	if err != nil {
 		t.Fatalf("buildBundle no deberia fallar: %v", err)
 	}
@@ -125,7 +149,7 @@ func TestBuildBundle_DocumentoSinEncabezadosEsValidoConAdvertencias(t *testing.T
 		t.Fatalf("se esperaba valid_with_warnings, se obtuvo %s", bundle.validationStatus)
 	}
 	if len(bundle.warnings) == 0 {
-		t.Fatal("se esperaba al menos una advertencia para un documento sin encabezados")
+		t.Fatal("se esperaba al menos una advertencia para un documento sin contenido legible")
 	}
 	if err := validateBundle(bundle.data); err != nil {
 		t.Fatalf("el bundle con advertencias debe seguir siendo descargable: %v", err)

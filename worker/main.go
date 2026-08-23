@@ -227,26 +227,21 @@ func buildLog(originalName string, conceptCount int, validationStatus string, wa
 	return logContent.String()
 }
 
+// bundleWarnings decide si un bundle es "valid" o "valid_with_warnings".
+//
+// Importante: un documento corto SIN encabezados que produce un unico
+// concepto es exactamente el caso "documento breve" de la seccion 6 del
+// enunciado, y esa condicion exige textualmente que el proceso "no falle
+// ni emita advertencias por el solo hecho de contener una unica unidad".
+// Por eso ya NO advertimos solo porque falten encabezados: la unica
+// advertencia real que queda es cuando el documento no tiene ningun
+// contenido legible (un caso distinto, no cubierto por esa condicion).
 func bundleWarnings(source []byte, concepts [][]byte) []string {
 	text := strings.TrimSpace(string(source))
 	if text == "" {
 		return []string{"El documento original no contiene texto legible."}
 	}
-	if len(concepts) == 1 && !hasMarkdownHeading(source) {
-		return []string{"No se detectaron encabezados Markdown; se genero un unico concepto a partir del documento completo."}
-	}
 	return nil
-}
-
-func hasMarkdownHeading(source []byte) bool {
-	text := strings.ReplaceAll(string(source), "\r\n", "\n")
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") && (len(trimmed) == 1 || trimmed[1] == ' ' || trimmed[1] == '#') {
-			return true
-		}
-	}
-	return false
 }
 
 func splitMarkdown(source []byte) [][]byte {
