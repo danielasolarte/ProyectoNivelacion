@@ -143,7 +143,7 @@ async function showBundleDetails(bundleId) {
     return;
   }
   $('bundle-id-input').value = data.bundle_id;
-  $('bundle-message').textContent = `${data.original_name} · ${formatStatus(data.validation_status)} · job ${shortId(data.job_id)}`;
+  $('bundle-message').textContent = `${data.original_name} · ${formatStatus(data.validation_status)} · Job ID: ${data.job_id}`;
 }
 
 async function downloadBundle(bundleId) {
